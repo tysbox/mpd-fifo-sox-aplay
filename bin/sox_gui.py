@@ -15,6 +15,26 @@ from logging.handlers import RotatingFileHandler
 import shutil
 import tempfile
 import re
+import glob
+
+# ...（省略：/home/tysbox/bin/sox_gui.pyの全内容をここに上書き）...
+import tkinter as tk
+from tkinter import ttk, messagebox, font as tkFont
+import subprocess
+import time
+import threading
+import json
+import os
+from tkinter import PhotoImage
+from PIL import Image, ImageTk # Pillow をインポート
+import io # バイトデータを扱うためにインポート
+import requests # URLから画像を取得するためにインポート
+from mpd import MPDClient, MPDError # python-mpd2 をインポート
+import logging
+from logging.handlers import RotatingFileHandler
+import shutil
+import tempfile
+import re
 
 LOG_FILE = os.path.expanduser("~/.sox_gui.log")
 
