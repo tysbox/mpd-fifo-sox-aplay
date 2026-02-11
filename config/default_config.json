@@ -1,0 +1,11 @@
+{
+  "music_type": "none",
+  "effects_type": "none",
+  "eq_output_type": "studio-monitors",
+  "gain": "0",
+  "noise_fir_type": "default",
+  "harmonic_fir_type": "dead",
+  "output_method": "aplay",
+  "output_device": "BlueALSA",
+  "fade_ms": "150"
+}

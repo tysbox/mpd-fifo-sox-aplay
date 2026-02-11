@@ -1,0 +1,11 @@
+[Unit]
+Description=SoX with MPD
+After=mpd.service
+
+[Service]
+Type=simple
+User=tysbox
+ExecStart=/var/lib/mpd/test_play.sh
+
+[Install]
+WantedBy=multi-user.target

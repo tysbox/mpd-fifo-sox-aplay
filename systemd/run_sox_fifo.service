@@ -1,0 +1,24 @@
+[Unit]
+Description=Sox FIFO Processing Service
+After=sound.target mpd.service bluetooth.service
+
+[Service]
+Type=simple
+# 重要: ExecStartにstdbuf -oLを追加
+ExecStart=/usr/bin/stdbuf -oL /bin/bash /home/tysbox/bin/run_sox_fifo.sh
+# 自動復旧
+Restart=on-failure
+RestartSec=5
+# リアルタイム優先度とCPU割当
+# CPUAffinity: CPU番号は環境に合わせて調整してください（例: 2 3）
+CPUAffinity=2 3
+CPUSchedulingPolicy=rr
+CPUSchedulingPriority=48
+# プロセスに高いRT優先度を与える（必要に応じて調整）
+LimitRTPRIO=99
+# ログ
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=MPD Song Change Watcher and Auto-Restarter
+After=mpd.service
+
+[Service]
+Type=simple
+ExecStart=/home/tysbox/bin/mpd_watcher.sh
+Restart=always
+User=tysbox
+
+[Install]
+WantedBy=multi-user.target
