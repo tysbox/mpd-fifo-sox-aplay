@@ -142,7 +142,11 @@ fi
 
 # --- リサンプル設定 ---
 # サンプルレートは192k固定とします
-RESAMPLE_CMD="rate -v -s -M 192k" # 音が出るスクリプトではレート指定が欠けていたが、ここでは明示的に指定
+# -v: Very high quality (95% bandwidth, 175dB rejection)
+# -s: Steep filter (bandwidth = 99%)
+# -M: Linear phase response (group delay minimized)
+# -b 95: Narrow bandwidth for precise phase response
+RESAMPLE_CMD="rate -v -s -M -b 95 192k"
 
 # --- SoX コマンドと再生コマンドの構築 ---
 # 入力設定 (MPD FIFOの標準的な形式に合わせる: S32_LE)
@@ -152,7 +156,8 @@ INPUT_OPTS="-t raw -r 192000 -e signed -b 32 -c 2"
 # 順序: ノイズ除去FIR -> 入力EQ -> 倍音FIR -> 出力EQ -> 環境エフェクト -> リサンプル -> 最終ゲイン -> ディザー
 # 注意: エフェクトは sox [入力] [出力] [エフェクト] の順で指定する必要があるため、
 # エフェクトチェーンの文字列自体はエフェクト部分のみで構成します。
-EFFECT_CHAIN="${NOISE_FIR_FILTER}${NOISE_FIR_FILTER:+" "}${EQ_INPUT}${EQ_INPUT:+" "}${HARMONIC_FIR_FILTER}${HARMONIC_FIR_FILTER:+" "}${EQ_OUTPUT}${EQ_OUTPUT:+" "}${EFFECTS}${EFFECTS:+" "}${RESAMPLE_CMD}${RESAMPLE_CMD:+" "}${FINAL_GAIN_CMD}${FINAL_GAIN_CMD:+" "}silence -l 1 0.05 0% pad 0 0.05 dither -S"
+# dither -s: Shaped noise with Shibata filter (perceptually reduces audible noise floor)
+EFFECT_CHAIN="${NOISE_FIR_FILTER}${NOISE_FIR_FILTER:+" "}${EQ_INPUT}${EQ_INPUT:+" "}${HARMONIC_FIR_FILTER}${HARMONIC_FIR_FILTER:+" "}${EQ_OUTPUT}${EQ_OUTPUT:+" "}${EFFECTS}${EFFECTS:+" "}${RESAMPLE_CMD}${RESAMPLE_CMD:+" "}${FINAL_GAIN_CMD}${FINAL_GAIN_CMD:+" "}silence -l 1 0.05 0% pad 0 0.05 dither -s"
 
 
 # 出力方法に応じたコマンド構築
