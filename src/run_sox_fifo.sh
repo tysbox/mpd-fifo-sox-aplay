@@ -146,12 +146,18 @@ elif [ $FIR_COMPENSATION -ne 0 ]; then
 fi
 
 # --- リサンプル設定 ---
-# サンプルレートは192k固定とします
+# Device-specific resampling target
 # -v: Very high quality (95% bandwidth, 175dB rejection)
 # -s: Steep filter (bandwidth = 99%)
 # -M: Linear phase response (group delay minimized)
 # -b 95: Narrow bandwidth for precise phase response
-RESAMPLE_CMD="rate -v -s -M -b 95 192k"
+if echo "$PLAY_DEVICE" | grep -qi bluealsa; then
+    # BlueALSA: resample to 96kHz for LDAC codec (lossless compression at 96kHz)
+    RESAMPLE_CMD="rate -v -s -M -b 95 96k"
+else
+    # PC audio/USB DAC: use highest quality at 192kHz
+    RESAMPLE_CMD="rate -v -s -M -b 95 192k"
+fi
 
 # --- SoX コマンドと再生コマンドの構築 ---
 # 入力設定 (MPD FIFOの標準的な形式に合わせる: S32_LE)
@@ -173,16 +179,18 @@ if [ "$OUTPUT_METHOD" == "soxplay" ]; then
     PLAY_CMD="" # play コマンド自体が出力を行うためパイプ不要
 
 elif [ "$OUTPUT_METHOD" == "aplay" ]; then
-    # aplay にパイプ (S32_LE 形式で出力)
-    # sox [入力オプション] <入力ファイル> [出力オプション] <出力ファイル> [エフェクト] の順にする (オリジナルスクリプトの順序)
-    # 出力オプションとして標準出力への raw S32_LE を指定
-    OUTPUT_OPTS="-t raw -e signed -b 32 -"
-    SOX_FULL_COMMAND="sox ${INPUT_OPTS} \"$FIFO_PATH\" ${OUTPUT_OPTS} ${EFFECT_CHAIN}" # オリジナルスクリプトの順序に修正
-    # aplay コマンド (標準入力から S32_LE を読む)
-    # --buffer-size=65536: 64KB バッファで underrun 防止
-    # --period-size=8192: 8KB バッファ周期で応答性向上
-    # nice -n -10: 優先度を上げてスケジューリング遅延を最小化
-    PLAY_CMD="| nice -n -10 taskset -c 2,3 aplay -D ${PLAY_DEVICE} -f S32_LE -r 192000 -c 2 --buffer-size=65536 --period-size=8192"
+    # Device-specific audio format configuration
+    if echo "$PLAY_DEVICE" | grep -qi bluealsa; then
+        # BlueALSA: use S32_LE at 96kHz for LDAC codec (supports 32bit lossless)
+        OUTPUT_OPTS="-t raw -e signed -b 32 -"
+        PLAY_CMD="| nice -n -10 taskset -c 2,3 aplay -D ${PLAY_DEVICE} -f S32_LE -r 96000 -c 2 --buffer-time=500000 --period-time=125000"
+    else
+        # PC audio and USB DAC: use S32_LE for maximum quality
+        OUTPUT_OPTS="-t raw -e signed -b 32 -"
+        PLAY_CMD="| nice -n -10 taskset -c 2,3 aplay -D ${PLAY_DEVICE} -f S32_LE -r 192000 -c 2 --buffer-size=65536 --period-size=8192"
+    fi
+    
+    SOX_FULL_COMMAND="sox ${INPUT_OPTS} \"$FIFO_PATH\" ${OUTPUT_OPTS} ${EFFECT_CHAIN}"
 
 else
     echo "不明な OUTPUT_METHOD: $OUTPUT_METHOD"
