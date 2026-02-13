@@ -11,40 +11,34 @@ CTL_PATH="/tmp/sox.ctl"
 FIR_BASE_PATH="/home/tysbox/bin/"
 
 # --- 設定値 (GUIから書き換えられる部分) ---
-MUSIC_TYPE="none"
-EFFECTS_TYPE="none"
+MUSIC_TYPE="jazz"
+EFFECTS_TYPE="vinyl"
 EQ_OUTPUT_TYPE="studio-monitors"
 GAIN="-5"
 NOISE_FIR_TYPE="default"
-HARMONIC_FIR_TYPE="dead"
+HARMONIC_FIR_TYPE="dynamic"
 OUTPUT_METHOD="aplay"
-OUTPUT_DEVICE="BlueALSA"
+OUTPUT_DEVICE="bluealsa"
 # SAMPLE_RATE="192000" # 現在は192k固定でリサンプル。将来的に可変にする場合のため (GUIから設定可能にする必要あり)
 # --- 設定値ここまで ---
 
-# --- 出力デバイスの選択 (GUI設定ファイルから取得) ---
-# GUIは ~/.sox_gui_config.json に 'output_device' を保存します。
-CONFIG_JSON="${HOME}/.sox_gui_config.json"
-OUTPUT_DEVICE=""
-if [ -f "$CONFIG_JSON" ]; then
-    OUTPUT_DEVICE=$(python3 -c "import json,sys; print(json.load(open('$CONFIG_JSON')).get('output_device',''))") || OUTPUT_DEVICE=""
-fi
-echo "Using OUTPUT_DEVICE=$OUTPUT_DEVICE"
+# --- 出力デバイスの選択 ---
 
 # 決定された出力先に基づき aplay 用のデバイス指定を行う
 PLAY_DEVICE="plug:default"
-if echo "$OUTPUT_DEVICE" | grep -Eq '^hw:[0-9]+'; then
-    PLAY_DEVICE="plug:${OUTPUT_DEVICE}"
+# If the configuration stores a specific hw: or plug: device, use it directly
+if echo "$OUTPUT_DEVICE" | grep -Eq '^hw:[0-9]+(,[0-9]+)?$'; then
+    PLAY_DEVICE="${OUTPUT_DEVICE}"
 elif echo "$OUTPUT_DEVICE" | grep -Eq '^plug:'; then
     PLAY_DEVICE="$OUTPUT_DEVICE"
 elif [ "$OUTPUT_DEVICE" = "bluealsa" ] || [ "$OUTPUT_DEVICE" = "BlueALSA" ]; then
+    # Use ALSA plug wrapper for bluealsa so format conversion works for aplay
     PLAY_DEVICE="plug:bluealsa"
-elif [ "$OUTPUT_DEVICE" = "PC Speakers" ] || [ "$OUTPUT_DEVICE" = "PC Speakers (hw:0)" ]; then
-    PLAY_DEVICE="plughw:CARD=PCH,DEV=0"
 elif [ "$OUTPUT_DEVICE" = "USB-DAC" ]; then
+    # USB 接続カードを検出
     CARDNUM=$(aplay -l 2>/dev/null | grep -m1 USB | sed -n 's/^card \([0-9]\+\):.*/\1/p')
     if [ -n "$CARDNUM" ]; then
-        PLAY_DEVICE="plug:hw:$CARDNUM"
+        PLAY_DEVICE="hw:$CARDNUM"
     else
         echo "警告: USB DAC が見つかりません。plug:default を使用します。" >&2
         PLAY_DEVICE="plug:default"
@@ -53,7 +47,7 @@ else
     PLAY_DEVICE="plug:default"
 fi
 
-echo "Using PLAY_DEVICE=$PLAY_DEVICE"
+echo "Using PLAY_DEVICE=$PLAY_DEVICE (OUTPUT_DEVICE=$OUTPUT_DEVICE)"
 
 # FIFOファイルが存在するか確認し、存在しない場合は作成
 if [ ! -p "$FIFO_PATH" ]; then
@@ -128,24 +122,22 @@ case $EQ_OUTPUT_TYPE in
     *)               EQ_OUTPUT="" ;;
 esac
 
-# --- ゲイン調整 (GUIからの値を独立して適用) + FIRゲイン補正 ---
+# --- ゲイン調整 (GUIからの値を独立して適用) ---
 FINAL_GAIN_CMD=""
-# ベースゲイン値を初期化
-FINAL_GAIN_VALUE="0"
-
-# GUIからのゲイン値を適用
-if [ -n "$GAIN" ] && [ "$GAIN" != "-0" ]; then
-    FINAL_GAIN_VALUE="$GAIN"
-fi
-
-# FIRが適用される場合は +5dB を追加
+# FIR フィルタが適用されている場合は、音量補正を追加
+FIR_COMPENSATION=0
 if [ -n "$NOISE_FIR_FILTER" ] || [ -n "$HARMONIC_FIR_FILTER" ]; then
-    FINAL_GAIN_VALUE=$(echo "$FINAL_GAIN_VALUE + 5" | bc)
+    FIR_COMPENSATION=5  # FIR適用時は +5dB 補正
 fi
 
-# 計算結果が0でない場合のみ gain コマンドを生成
-if [ "$FINAL_GAIN_VALUE" != "0" ]; then
-    FINAL_GAIN_CMD="gain ${FINAL_GAIN_VALUE}"
+# GAIN 変数が空でなく、かつ "-0" (文字列としてのゼロ) でない場合のみ gain コマンドを生成
+if [ -n "$GAIN" ] && [ "$GAIN" != "-0" ]; then
+    # GAIN値とFIR補正を合算 (例: GAIN=-3, FIR_COMPENSATION=6 → 3dB)
+    TOTAL_GAIN=$((${GAIN} + ${FIR_COMPENSATION}))
+    FINAL_GAIN_CMD="gain ${TOTAL_GAIN}"
+elif [ $FIR_COMPENSATION -ne 0 ]; then
+    # GAINが設定されていないがFIR補正が必要な場合
+    FINAL_GAIN_CMD="gain ${FIR_COMPENSATION}"
 fi
 
 # --- リサンプル設定 ---
@@ -160,14 +152,14 @@ INPUT_OPTS="-t raw -r 192000 -e signed -b 32 -c 2"
 # 順序: ノイズ除去FIR -> 入力EQ -> 倍音FIR -> 出力EQ -> 環境エフェクト -> リサンプル -> 最終ゲイン -> ディザー
 # 注意: エフェクトは sox [入力] [出力] [エフェクト] の順で指定する必要があるため、
 # エフェクトチェーンの文字列自体はエフェクト部分のみで構成します。
-EFFECT_CHAIN="${NOISE_FIR_FILTER}${NOISE_FIR_FILTER:+" "}${EQ_INPUT}${EQ_INPUT:+" "}${HARMONIC_FIR_FILTER}${HARMONIC_FIR_FILTER:+" "}${EQ_OUTPUT}${EQ_OUTPUT:+" "}${EFFECTS}${EFFECTS:+" "}${RESAMPLE_CMD}${RESAMPLE_CMD:+" "}${FINAL_GAIN_CMD}${FINAL_GAIN_CMD:+" "}dither -S"
+EFFECT_CHAIN="${NOISE_FIR_FILTER}${NOISE_FIR_FILTER:+" "}${EQ_INPUT}${EQ_INPUT:+" "}${HARMONIC_FIR_FILTER}${HARMONIC_FIR_FILTER:+" "}${EQ_OUTPUT}${EQ_OUTPUT:+" "}${EFFECTS}${EFFECTS:+" "}${RESAMPLE_CMD}${RESAMPLE_CMD:+" "}${FINAL_GAIN_CMD}${FINAL_GAIN_CMD:+" "}silence -l 1 0.05 0% pad 0 0.05 dither -S"
 
 
 # 出力方法に応じたコマンド構築
 if [ "$OUTPUT_METHOD" == "soxplay" ]; then
     # play コマンドとして実行
     # play [入力オプション] [入力ファイル] [エフェクト]
-    SOX_FULL_COMMAND="play ${INPUT_OPTS} \"$FIFO_PATH\" ${EFFECT_CHAIN}"
+    SOX_FULL_COMMAND="AUDIODEV=${PLAY_DEVICE} play ${INPUT_OPTS} \"$FIFO_PATH\" ${EFFECT_CHAIN}"
     PLAY_CMD="" # play コマンド自体が出力を行うためパイプ不要
 
 elif [ "$OUTPUT_METHOD" == "aplay" ]; then
@@ -177,23 +169,180 @@ elif [ "$OUTPUT_METHOD" == "aplay" ]; then
     OUTPUT_OPTS="-t raw -e signed -b 32 -"
     SOX_FULL_COMMAND="sox ${INPUT_OPTS} \"$FIFO_PATH\" ${OUTPUT_OPTS} ${EFFECT_CHAIN}" # オリジナルスクリプトの順序に修正
     # aplay コマンド (標準入力から S32_LE を読む)
-    # --- 可逆オプション: CPUピン留めとバッファ設定 (安定化用) ---
-    # 有効にするには次の行のコメントを外し、下のデフォルト行をコメントアウトしてください
-    # (例: CPU 2,3 にピン留めし、バッファ/period を明示指定)
-    PLAY_CMD="| taskset -c 2,3 aplay -D $PLAY_DEVICE -f S32_LE -r 192000 -c 2 --buffer-time=600000 --period-time=60000"
-    # --- デフォルト (変更不要) ---
-    # PLAY_CMD="| aplay -D default -f S32_LE -r 192000 -c 2" # レートはSoXのリサンプル出力に合わせる
-    # NOTE: To revert buffer/period to previous values, replace --buffer-time/--period-time with 400000/40000 or 200000/20000
+    PLAY_CMD="| taskset -c 2,3 aplay -D ${PLAY_DEVICE} -f S32_LE -r 192000 -c 2" # use chosen PLAY_DEVICE from config or defaults
 
 else
     echo "不明な OUTPUT_METHOD: $OUTPUT_METHOD"
     exit 1
 fi
 
-# 最終的なコマンド実行
-echo "Executing Sox chain:"
-echo "$SOX_FULL_COMMAND $PLAY_CMD" # デバッグ用にコマンドを表示
-# shellcheck disable=SC2086 # eval is needed here for the pipe to aplay
-eval "$SOX_FULL_COMMAND $PLAY_CMD"
+# Ensure previous run_sox_fifo instances (and processes using FIFO) are not still running
+if pgrep -f "${FIFO_PATH}" >/dev/null 2>&1; then
+    echo "既存の再生プロセスを検出したため停止します..."
+    pkill -f "${FIFO_PATH}" || true
+    sleep 0.5
+fi
 
-echo "Sox process finished."
+# --- 曲切り替え時の自動リスタート機能 ---
+# MPD の player イベント（曲切り替え・停止・再生）を検出し、
+# SoX パイプラインを再起動して FIFO とエフェクト状態をリセットする。
+# TRACK_CHANGE_RESTART=1 で有効（デフォルト有効）、0 で従来の一発実行モード。
+TRACK_CHANGE_RESTART="${TRACK_CHANGE_RESTART:-1}"
+# MPD を曲切り替え時に再起動するか (1=yes, 0=no). デフォルト: 無効（連続再生での停止を避けるため）
+MPD_RESTART_ON_TRACK="${MPD_RESTART_ON_TRACK:-0}"
+
+start_sox_pipeline() {
+    echo "Executing Sox chain:"
+    echo "$SOX_FULL_COMMAND $PLAY_CMD"
+    # shellcheck disable=SC2086
+    eval "$SOX_FULL_COMMAND $PLAY_CMD" &
+    SOX_PID=$!
+    echo "Sox pipeline started (PID=$SOX_PID)"
+}
+
+stop_sox_pipeline() {
+    if [ -n "$SOX_PID" ] && kill -0 "$SOX_PID" 2>/dev/null; then
+        echo "Stopping sox pipeline (PID=$SOX_PID)..."
+        kill "$SOX_PID" 2>/dev/null
+        wait "$SOX_PID" 2>/dev/null || true
+    fi
+    # aplay が残っている場合も停止
+    pkill -f "aplay.*${PLAY_DEVICE}" 2>/dev/null || true
+    SOX_PID=""
+}
+
+flush_fifo() {
+    # FIFO に残っているデータを捨てる（ノンブロッキング読み出し）
+    dd if="$FIFO_PATH" of=/dev/null bs=65536 iflag=nonblock 2>/dev/null || true
+}
+
+# クリーンアップ用トラップ
+cleanup() {
+    echo "Shutting down..."
+    stop_sox_pipeline
+    # Python 監視プロセスも停止
+    [ -n "$MONITOR_PID" ] && kill "$MONITOR_PID" 2>/dev/null || true
+    exit 0
+}
+trap cleanup SIGTERM SIGINT SIGHUP
+
+if [ "$TRACK_CHANGE_RESTART" = "1" ]; then
+    echo "=== 曲切り替え自動リスタートモード (TRACK_CHANGE_RESTART=1) ==="
+
+    # MPD の player イベントを監視して曲切り替え時にシグナルファイルに書き込む Python スクリプト
+    SIGNAL_FILE="/tmp/sox_track_change.signal"
+    rm -f "$SIGNAL_FILE"
+
+    MPD_MONITOR_SCRIPT='
+import mpd, sys, time, os, subprocess
+signal_file = sys.argv[1]
+# restart flag is passed as second arg: "1" to enable restarting mpd on track changes
+restart_flag = len(sys.argv) > 2 and sys.argv[2] == "1"
+last_restart = 0.0
+THROTTLE_SECONDS = 1.0
+while True:
+    try:
+        c = mpd.MPDClient()
+        c.connect("localhost", 6600)
+        st = c.status()
+        last_songid = st.get("songid", "")
+        last_state = st.get("state", "stop")
+        print("MPD_MONITOR: INIT songid=" + last_songid + " state=" + last_state, flush=True)
+        while True:
+            c.idle("player")
+            st = c.status()
+            state = st.get("state", "stop")
+            songid = st.get("songid", "")
+            now = time.time()
+            if state == "stop":
+                print("MPD_MONITOR: STOPPED", flush=True)
+                with open(signal_file, "w") as f:
+                    f.write("STOPPED\n")
+            elif songid != last_songid:
+                print("MPD_MONITOR: TRACK:" + songid + " (prev_state=" + last_state + " state=" + state + ")", flush=True)
+                # Restart mpd only when a track change occurs during continuous playback (play -> play)
+                if restart_flag and last_state == "play" and state == "play":
+                    if now - last_restart > THROTTLE_SECONDS:
+                        print("MPD_MONITOR: Restarting mpd between consecutive tracks", flush=True)
+                        try:
+                            subprocess.run(["/bin/systemctl", "restart", "mpd"], check=False)
+                        except Exception as ex:
+                            print("MPD_MONITOR: Failed to restart mpd: " + str(ex), flush=True, file=sys.stderr)
+                        last_restart = now
+                with open(signal_file, "w") as f:
+                    f.write("TRACK:" + songid + ":" + state + "\n")
+                last_songid = songid
+            last_state = state
+    except Exception as e:
+        print("MPD_MONITOR: ERROR: " + str(e), flush=True, file=sys.stderr)
+        time.sleep(2)
+'
+
+    # MPD 監視をバックグラウンドで起動
+    python3 -u -c "$MPD_MONITOR_SCRIPT" "$SIGNAL_FILE" "$MPD_RESTART_ON_TRACK" &
+    MONITOR_PID=$!
+    echo "MPD monitor started (PID=$MONITOR_PID) (MPD_RESTART_ON_TRACK=$MPD_RESTART_ON_TRACK)"
+
+    # パイプラインを初回起動
+    start_sox_pipeline
+
+    # メインループ: シグナルファイルをポーリングして曲切り替えを検出
+    while true; do
+        # 監視プロセスが死んでいたら再起動
+        if ! kill -0 "$MONITOR_PID" 2>/dev/null; then
+            echo "警告: MPD monitor が停止しました。再起動します..."
+            python3 -u -c "$MPD_MONITOR_SCRIPT" "$SIGNAL_FILE" "$MPD_RESTART_ON_TRACK" &
+            MONITOR_PID=$!
+        fi
+
+        # シグナルファイルをチェック
+        if [ -f "$SIGNAL_FILE" ]; then
+            EVENT=$(cat "$SIGNAL_FILE" 2>/dev/null)
+            rm -f "$SIGNAL_FILE"
+            case "$EVENT" in
+                TRACK:*)
+                    # EVENT format: TRACK:<songid>:<state>
+                    TRACK_INFO=${EVENT#TRACK:}
+                    SONGID=${TRACK_INFO%%:*}
+                    STATE=${TRACK_INFO#*:}
+                    echo ">>> 曲が切り替わりました ($EVENT) — state=$STATE — SoX パイプライン処理を判断します"
+                    # 連続再生（play -> play）の場合は SoX 再起動をスキップして gapless を優先
+                    if [ "${LAST_TRACK_STATE}" = "play" ] && [ "$STATE" = "play" ]; then
+                        echo ">>> 連続再生の曲切替を検出 — SoX の再起動をスキップします"
+                    else
+                        echo ">>> SoX パイプラインを再起動します"
+                        stop_sox_pipeline
+                        flush_fifo
+                        sleep 0.05
+                        start_sox_pipeline
+                    fi
+                    LAST_TRACK_STATE="$STATE"
+                    ;;
+                STOPPED*)
+                    echo ">>> MPD 停止 — SoX パイプラインを停止します"
+                    stop_sox_pipeline
+                    LAST_TRACK_STATE="stop"
+                    ;;
+            esac
+        fi
+
+        # SoX パイプラインが予期せず死んでいたら再起動
+        if [ -n "$SOX_PID" ] && ! kill -0 "$SOX_PID" 2>/dev/null; then
+            echo "警告: SoX パイプラインが停止しました。再起動します..."
+            flush_fifo
+            sleep 0.1
+            start_sox_pipeline
+        fi
+
+        sleep 0.2
+    done
+
+else
+    # --- 従来モード: 一発実行 ---
+    echo "Executing Sox chain:"
+    echo "$SOX_FULL_COMMAND $PLAY_CMD"
+    # shellcheck disable=SC2086
+    eval "$SOX_FULL_COMMAND $PLAY_CMD"
+    echo "Sox process finished."
+fi
+

@@ -15,6 +15,8 @@ from logging.handlers import RotatingFileHandler
 import shutil
 import tempfile
 import re
+import glob
+
 
 LOG_FILE = os.path.expanduser("~/.sox_gui.log")
 
@@ -48,6 +50,33 @@ DEFAULT_OUTPUT_METHODS = ["aplay", "soxplay"]
 DEFAULT_NOISE_FIR_TYPES = ["default", "light", "medium", "strong", "off"] # シェルスクリプトのcaseに合わせる
 DEFAULT_HARMONIC_FIR_TYPES = ["dynamic", "dead", "base", "med", "high", "off"] # シェルスクリプトのcaseに合わせる
 
+# Presets external file (effects/eq lists + optional named presets)
+PRESETS_FILE = os.path.expanduser("/home/tysbox/bin/presets.json")
+
+def load_presets():
+    """Load global presets/effects/eq lists from PRESETS_FILE and return a dict with keys 'effects','eq_outputs','presets'.
+    If file missing or invalid, create a default structure and return it."""
+    defaults = {
+        "effects": ["Viena-Symphony-Hall","Suntory-Music-Hall","NewMorning-JazzClub","Wembley-Studium","AbbeyRoad-Studio","vinyl","none"],
+        "eq_outputs": ["studio-monitors","JBL-Speakers","planar-magnetic","bt-earphones","med-harmonics","high-harmonics","none"],
+        "presets": {}
+    }
+    try:
+        with open(PRESETS_FILE, 'r') as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        data = defaults
+        try:
+            with open(PRESETS_FILE, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.info("Created default presets file: %s", PRESETS_FILE)
+        except Exception as e:
+            logger.warning("Could not create presets file: %s", e)
+    data.setdefault('effects', defaults['effects'])
+    data.setdefault('eq_outputs', defaults['eq_outputs'])
+    data.setdefault('presets', {})
+    return data
+
 # --- 設定ファイルの読み書き ---
 def load_config():
     try:
@@ -66,7 +95,7 @@ def load_config():
     config.setdefault("noise_fir_type", "default") # 新しい設定
     config.setdefault("harmonic_fir_type", "base") # 新しい設定
     config.setdefault("fade_ms", "150") # フェードイン時間（ms）
-    config.setdefault("output_device", "default") # 新しい設定: 出力デバイス
+    config.setdefault("output_device", "BlueALSA") # 新しい設定: 出力デバイス (デフォルト BlueALSA)
     config.setdefault("presets", {})
 
     # 古いプリセット形式からの移行（もし必要なら）
@@ -77,8 +106,35 @@ def load_config():
     return config
 
 def save_config(config):
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4) # 見やすくインデント
+    """Save config atomically to avoid corruption from partial writes.
+    Creates a temp file on the same filesystem and replaces the real file.
+    Falls back to direct write on failure but logs the exception.
+    """
+    dirpath = os.path.dirname(CONFIG_FILE) or '.'
+    fd, tmp_path = tempfile.mkstemp(dir=dirpath)
+    try:
+        with os.fdopen(fd, 'w') as tf:
+            json.dump(config, tf, indent=4)
+            tf.flush()
+            os.fsync(tf.fileno())
+        os.replace(tmp_path, CONFIG_FILE)
+        logger.info("Saved config to %s", CONFIG_FILE)
+    except Exception as e:
+        logger.exception("Failed to save config atomically: %s", e)
+        # Fallback: try simple write (less safe)
+        try:
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(config, f, indent=4)
+        except Exception:
+            logger.exception("Fallback save also failed.")
+            raise
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
 
 def validate_settings(config):
     """設定の妥当性を簡易チェックして、無効なキーをリストで返す。"""
@@ -107,9 +163,6 @@ def validate_settings(config):
             errors.append("fade_ms")
     except Exception:
         errors.append("fade_ms")
-    # output_device は非空文字列であること
-    if not config.get("output_device"):
-        errors.append("output_device")
     return errors
 
 
@@ -158,43 +211,76 @@ def restart_service():
     # まずユーザーサービスとして存在するかを確認
     ok, _ = _run_systemctl(["--user", "status", "run_sox_fifo.service"], use_sudo=False)
     if ok:
-        ok2, res = _run_systemctl(["--user", "restart", "run_sox_fifo.service"], use_sudo=False)
+        # reset-failed -> stop -> start の順で確実に再起動
+        _run_systemctl(["--user", "reset-failed", "run_sox_fifo.service"], use_sudo=False)
+        _run_systemctl(["--user", "stop", "run_sox_fifo.service"], use_sudo=False)
+        ok2, res = _run_systemctl(["--user", "start", "run_sox_fifo.service"], use_sudo=False)
         if ok2:
             logger.info("ユーザー単位のサービスを再起動しました。")
+            # schedule GUI update on main thread
+            try:
+                root.after(500, update_gui_from_config)
+                root.after(500, display_settings)
+            except Exception:
+                pass
             return
         else:
             messagebox.showerror("エラー", f"ユーザーサービスの再起動に失敗しました: {res}")
             return
 
     # ユーザーサービスが見つからない/再起動できない場合は sudo 経由で試す（まずは非対話で）
-    ok3, res3 = _run_systemctl(["restart", "run_sox_fifo.service"], use_sudo=True)
+    # reset-failed を先に行い、stop->start で再起動を試みる
+    _run_systemctl(["reset-failed", "run_sox_fifo.service"], use_sudo=True)
+    _run_systemctl(["stop", "run_sox_fifo.service"], use_sudo=True)
+    ok3, res3 = _run_systemctl(["start", "run_sox_fifo.service"], use_sudo=True)
     if ok3:
         logger.info("システムサービスを sudo で再起動しました。")
+        try:
+            root.after(500, update_gui_from_config)
+            root.after(500, display_settings)
+        except Exception:
+            pass
         return
 
     # 非対話で失敗した場合、ターミナルでパスワードを入力して再試行するか確認
     stderr = getattr(res3, 'stderr', '') or str(res3)
     logger.warning("非対話 sudo に失敗しました: %s", stderr)
 
-    if messagebox.askyesno("パスワードが必要", "サービスの再起動には sudo のパスワードが必要です。\nターミナルでパスワードを入力して再試行しますか？"):
-        # ユーザーが GUI を端末から起動している場合、ここでパスワードプロンプトが端末に出ます
+    # 対話的なユーザー確認/再起動はメインスレッドでダイアログを表示する必要があるため、
+    # root.after() でメインスレッドに処理を委譲する。
+    def _interactive_restart():
         try:
-            subprocess.run(["/usr/bin/sudo", "/usr/bin/systemctl", "restart", "run_sox_fifo.service"], check=True)
-            logger.info("sudo による再起動が成功しました（対話）。")
-            messagebox.showinfo("成功", "サービスを再起動しました。")
-            return
-        except subprocess.CalledProcessError as e:
-            logger.error("対話 sudo による再起動が失敗しました: %s", e)
-            messagebox.showerror("エラー", f"対話モードでの再起動に失敗しました:\n{e}")
-            return
+            if messagebox.askyesno("パスワードが必要", "サービスの再起動には sudo のパスワードが必要です。\nターミナルでパスワードを入力して再試行しますか？"):
+                try:
+                    subprocess.run(["/usr/bin/sudo", "/usr/bin/systemctl", "restart", "run_sox_fifo.service"], check=True)
+                    logger.info("sudo による再起動が成功しました（対話）。")
+                    messagebox.showinfo("成功", "サービスを再起動しました。")
+                    try:
+                        root.after(500, update_gui_from_config)
+                        root.after(500, display_settings)
+                    except Exception:
+                        pass
+                    return
+                except subprocess.CalledProcessError as e:
+                    logger.error("対話 sudo による再起動が失敗しました: %s", e)
+                    messagebox.showerror("エラー", f"対話モードでの再起動に失敗しました:\n{e}")
+                    return
+                except Exception as e:
+                    logger.exception("対話 sudo 実行中に例外が発生しました: %s", e)
+                    messagebox.showerror("エラー", f"再起動中に予期せぬエラーが発生しました: {e}")
+                    return
+            else:
+                # ユーザーが拒否した場合は手動で実行するよう案内
+                messagebox.showinfo("情報", "ターミナルで `sudo systemctl restart run_sox_fifo.service` を実行してください。")
+                return
         except Exception as e:
-            logger.exception("対話 sudo 実行中に例外が発生しました: %s", e)
-            messagebox.showerror("エラー", f"再起動中に予期せぬエラーが発生しました: {e}")
-            return
-    else:
-        # ユーザーが拒否した場合は手動で実行するよう案内
-        messagebox.showinfo("情報", "ターミナルで `sudo systemctl restart run_sox_fifo.service` を実行してください。")
-        return
+            logger.exception("Interactive restart dialog failed: %s", e)
+
+    try:
+        root.after(0, _interactive_restart)
+    except Exception:
+        logger.exception("Could not schedule interactive restart; advise user to run sudo systemctl restart run_sox_fifo.service")
+        logger.info("ターミナルで `sudo systemctl restart run_sox_fifo.service` を実行してください。")
 
 # --- シェルスクリプト書き換え ---
 def update_shell_script(config):
@@ -209,13 +295,28 @@ def update_shell_script(config):
         messagebox.showerror("設定エラー", "無効な設定: " + ", ".join(errs))
         return False
 
-    # バックアップ作成機能を無効化（オリジナルは run_sox_fifo.sh.original として保存済み）
-    # timestamp = time.strftime('%Y%m%dT%H%M%S')
-    # bak_path = f"{RUN_SOX_FIFO_SH}.bak.{timestamp}"
+    timestamp = time.strftime('%Y%m%dT%H%M%S')
+    bak_path = f"{RUN_SOX_FIFO_SH}.bak.{timestamp}"
     try:
-        # shutil.copy2(RUN_SOX_FIFO_SH, bak_path)
-        # logger.info("バックアップを作成しました: %s", bak_path)
-        pass
+        shutil.copy2(RUN_SOX_FIFO_SH, bak_path)
+        logger.info("バックアップを作成しました: %s", bak_path)
+
+        # バックアップ先ディレクトリ
+        backup_dir = "/home/tysbox/bin/backups"
+        os.makedirs(backup_dir, exist_ok=True)
+
+        # バックアップディレクトリに移動
+        bak_path = os.path.join(backup_dir, os.path.basename(bak_path))
+        shutil.move(f"{RUN_SOX_FIFO_SH}.bak.{timestamp}", bak_path)
+        logger.info("バックアップを移動しました: %s", bak_path)
+
+        # バックアップディレクトリ内のバックアップファイル数を制限
+        backup_files = sorted(glob.glob(os.path.join(backup_dir, f"{os.path.basename(RUN_SOX_FIFO_SH)}.bak.*")))
+        max_backups = 10
+        if len(backup_files) > max_backups:
+            for old_backup in backup_files[:-max_backups]:
+                os.remove(old_backup)
+                logger.info("古いバックアップを削除しました: %s", old_backup)
 
         with open(RUN_SOX_FIFO_SH, 'r') as f:
             lines = f.readlines()
@@ -229,8 +330,8 @@ def update_shell_script(config):
             "NOISE_FIR_TYPE": config["noise_fir_type"],
             "HARMONIC_FIR_TYPE": config["harmonic_fir_type"],
             "OUTPUT_METHOD": config["output_method"],
-            "OUTPUT_DEVICE": config.get("output_device", "default"),
-            "FADE_MS": config.get("fade_ms", "150")
+            "FADE_MS": config.get("fade_ms", "150"),
+            "OUTPUT_DEVICE": config.get("output_device", "BlueALSA")
         }
 
         for line in lines:
@@ -259,7 +360,7 @@ def update_shell_script(config):
 
             # 問題なければ差し替え
             os.replace(tmp_path, RUN_SOX_FIFO_SH)
-            logger.info("%s を更新しました。", RUN_SOX_FIFO_SH)
+            logger.info("%s を更新しました。バックアップ: %s", RUN_SOX_FIFO_SH, bak_path)
             return True
         finally:
             if os.path.exists(tmp_path):
@@ -269,7 +370,11 @@ def update_shell_script(config):
                     pass
 
     except subprocess.CalledProcessError as e:
-        # 構文チェック失敗
+        # 構文チェック失敗: バックアップから復元
+        try:
+            shutil.copy2(bak_path, RUN_SOX_FIFO_SH)
+        except Exception:
+            pass
         logger.error("スクリプトの構文チェックに失敗しました: %s", e.stderr)
         messagebox.showerror("エラー", f"スクリプトの構文チェックに失敗しました。変更を元に戻しました。\n{e.stderr}")
         return False
@@ -286,15 +391,29 @@ def apply_settings():
     if selected_music_type in config["presets"]:
         preset = config["presets"][selected_music_type]
         config["music_type"] = selected_music_type
-        config["effects_type"] = preset.get("effects_type", effects_var.get())
-        config["eq_output_type"] = preset.get("eq_output_type", eq_var.get())
-        config["gain"] = preset.get("gain", gain_var.get())
-        config["noise_fir_type"] = preset.get("noise_fir_type", noise_fir_var.get())
-        config["harmonic_fir_type"] = preset.get("harmonic_fir_type", harmonic_fir_var.get())
-        # output_method はプリセットに含めない方が混乱が少ないかも
-        config["output_method"] = output_method_var.get()
-        config["output_device"] = output_device_var.get()
-        config["fade_ms"] = fade_ms_var.get()
+        # UI による個別変更がプリセットと異なる場合は UI の値を優先（手動オーバーライド）
+        ui_values = {
+            "effects_type": effects_var.get(),
+            "eq_output_type": eq_var.get(),
+            "gain": gain_var.get(),
+            "noise_fir_type": noise_fir_var.get(),
+            "harmonic_fir_type": harmonic_fir_var.get(),
+            "output_method": output_method_var.get(),
+            "fade_ms": fade_ms_var.get()
+        }
+        override = any(str(ui_values[k]) != str(preset.get(k, ui_values[k])) for k in ui_values)
+        if override:
+            logger.info("Preset '%s' overridden by UI values; applying manual settings", selected_music_type)
+            config.update(ui_values)
+        else:
+            # プリセットの値をそのまま使用（プリセットに項目が無い場合は UI 値を使用）
+            config["effects_type"] = preset.get("effects_type", ui_values["effects_type"])
+            config["eq_output_type"] = preset.get("eq_output_type", ui_values["eq_output_type"])
+            config["gain"] = preset.get("gain", ui_values["gain"])
+            config["noise_fir_type"] = preset.get("noise_fir_type", ui_values["noise_fir_type"])
+            config["harmonic_fir_type"] = preset.get("harmonic_fir_type", ui_values["harmonic_fir_type"])
+            config["output_method"] = ui_values["output_method"]
+            config["fade_ms"] = ui_values["fade_ms"]
     else:
         config["music_type"] = selected_music_type
         config["effects_type"] = effects_var.get()
@@ -303,8 +422,9 @@ def apply_settings():
         config["noise_fir_type"] = noise_fir_var.get()
         config["harmonic_fir_type"] = harmonic_fir_var.get()
         config["output_method"] = output_method_var.get()
-        config["output_device"] = output_device_var.get()
         config["fade_ms"] = fade_ms_var.get()
+
+    # Note: output_device is managed via presets and edit dialog; no main-device combobox by default.
 
     # GUI表示を更新
     update_gui_from_config()
@@ -352,10 +472,18 @@ def update_gui_from_config():
         fade_ms_var.set(config.get("fade_ms", "150"))
     except NameError:
         pass
+
+
+
+    # main output device (existence check and set by display name)
     try:
-        output_device_var.set(config.get("output_device", "default"))
+        # find display name for configured device id
+        configured = config.get("output_device", "")
+        # no main output combobox present in simplified display; nothing to set here
     except NameError:
         pass
+
+
 
 # --- プリセット編集 ---
 def edit_preset():
@@ -441,7 +569,7 @@ def edit_preset():
     gain_entry = ttk.Entry(gain_lf, textvariable=edit_gain_var, width=10)
     gain_entry.pack(pady=5)
 
-
+    # Output device selection is global (managed in Gain tab). Removed local preset-level output device control to avoid duplication.
     # --- 保存ボタン ---
     def save_preset_action():
         preset_name = preset_name_var.get().strip()
@@ -522,7 +650,32 @@ def delete_preset():
                  display_settings()
 
 
+# --- Presets 再読み込み ---
+def reload_presets_action():
+    try:
+        pdata = load_presets()
+        merged = False
+        for pname, pvals in pdata.get('presets', {}).items():
+            if pname not in config.get('presets', {}):
+                config.setdefault('presets', {})[pname] = pvals
+                merged = True
+            if pname not in config.get('music_types', []):
+                config.setdefault('music_types', []).append(pname)
+                music_listbox.insert(tk.END, pname)
+                merged = True
+        if merged:
+            save_config(config)
+            messagebox.showinfo('完了', 'Presets を再読み込みして Music Type リストに反映しました。')
+            display_settings()
+        else:
+            messagebox.showinfo('情報', '新しいプリセットは見つかりませんでした。')
+    except Exception as e:
+        logger.exception('reload_presets_action failed: %s', e)
+        messagebox.showerror('エラー', f'Presets の再読込に失敗しました: {e}')
+
+
 # --- 現在設定表示 ---
+
 def display_settings():
     active_type = music_listbox.get(tk.ACTIVE) if music_listbox.curselection() else config["music_type"]
     settings_text = f"Music Type: {active_type}\n"
@@ -556,7 +709,7 @@ def extract_main_artist(artist_field):
 
 def fetch_album_art_from_itunes(artist, album):
     try:
-        print(f"iTunes API を使って検索中: Artist={artist}, Album={album}")
+        logger.debug("iTunes lookup: %s - %s", artist, album)
         query = f"{artist} {album}".replace(" ", "+")
         url = f"https://itunes.apple.com/search?term={query}&entity=album&limit=1"
         response = requests.get(url, timeout=5)
@@ -565,18 +718,17 @@ def fetch_album_art_from_itunes(artist, album):
         if results:
             art_url = results[0].get("artworkUrl100")
             if art_url:
-                # 高解像度に置換
                 art_url = art_url.replace("100x100", "600x600")
                 return fetch_art_from_url(art_url)
-        print("iTunes API: 該当するアートが見つかりませんでした。")
+        logger.debug("iTunes: no artwork for %s - %s", artist, album)
     except Exception as e:
-        print(f"iTunes APIエラー: {e}")
+        logger.debug("iTunes lookup error: %s", e)
     return None
 
 
 def fetch_album_art_from_musicbrainz(artist, album):
     try:
-        print(f"MusicBrainzで検索中: Artist={artist}, Album={album}")
+        logger.debug("MusicBrainz lookup: %s - %s", artist, album)
         headers = {"User-Agent": "sox-gui/1.0 (tysbox@example.com)"}
         query = f'"{album}" AND artist:"{artist}"'
         url = f"https://musicbrainz.org/ws/2/release/?query={query}&fmt=json&limit=1"
@@ -585,18 +737,17 @@ def fetch_album_art_from_musicbrainz(artist, album):
         data = response.json()
         releases = data.get("releases", [])
         if not releases:
-            print("MusicBrainz: 該当するリリースが見つかりませんでした。")
+            logger.debug("MusicBrainz: no releases for %s - %s", artist, album)
             return None
 
         mbid = releases[0].get("id")
-        print(f"MusicBrainzリリースID: {mbid}")
+        logger.debug("MusicBrainz release id: %s", mbid)
 
-        # Cover Art Archive から画像取得
         art_url = f"https://coverartarchive.org/release/{mbid}/front-500.jpg"
         return fetch_art_from_url(art_url)
 
     except Exception as e:
-        print(f"MusicBrainz/CoverArt取得エラー: {e}")
+        logger.debug("MusicBrainz/CoverArt error: %s", e)
         return None
 
 def fetch_album_art(mpd_client):
@@ -651,16 +802,16 @@ def fetch_album_art(mpd_client):
 
 def fetch_art_from_url(url):
     try:
-        print(f"URLからアルバムアートを取得中: {url}")
-        response = requests.get(url, timeout=5) # タイムアウト設定
-        response.raise_for_status() # エラーチェック (HTTP status code が 200番台でない場合は例外を発生)
-        print(f"アルバムアート取得成功 (ステータスコード: {response.status_code}, サイズ: {len(response.content)} bytes)")
+        logger.debug("Fetching album art URL: %s", url)
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        logger.debug("Fetched album art: status=%s size=%s", response.status_code, len(response.content))
         return process_image_data(response.content)
     except requests.exceptions.RequestException as e:
-        print(f"アルバムアートURL取得エラー ({url}): {e}")
+        logger.debug("fetch_art_from_url request error %s: %s", url, e)
         return None
     except Exception as e:
-        print(f"URLからの画像処理エラー: {e}")
+        logger.exception("fetch_art_from_url processing error: %s", e)
         return None
         
 def load_art_from_path(path):
@@ -669,33 +820,30 @@ def load_art_from_path(path):
             image_data = f.read()
         return process_image_data(image_data)
     except FileNotFoundError:
-        print(f"アルバムアートファイルが見つかりません: {path}")
+        logger.debug("Local album art file not found: %s", path)
         return None
     except Exception as e:
-        print(f"ローカルファイルからの画像処理エラー: {e}")
+        logger.debug("load_art_from_path error: %s", e)
         return None
+
 
 def process_image_data(image_data):
     try:
-        image = Image.open(io.BytesIO(image_data))
-
-        width, height = image.size
-        min_edge = min(width, height)
-        left = (width - min_edge) // 2
-        top = (height - min_edge) // 2
-        image = image.crop((left, top, left + min_edge, top + min_edge))
-
-        target_size = min(album_art_label.winfo_width(), album_art_label.winfo_height())
-        if target_size < 10:
-            target_size = 250
-
-        image = image.resize((target_size, target_size), Image.Resampling.LANCZOS)
-        photo = ImageTk.PhotoImage(image)
-        logger.info(f"画像リサイズ成功: {image.size}")
-        return photo
-
+        img = Image.open(io.BytesIO(image_data)).convert('RGBA')
+        w, h = img.size
+        m = min(w, h)
+        img = img.crop(((w-m)//2, (h-m)//2, (w+m)//2, (h+m)//2))
+        tw = album_art_label.winfo_width()
+        th = album_art_label.winfo_height()
+        if tw < 10 or th < 10:
+            size = 2500
+        else:
+            size = min(tw, th)
+        img = img.resize((size, size), Image.Resampling.LANCZOS)
+        logger.info("画像リサイズ成功: %s", img.size)
+        return ImageTk.PhotoImage(img)
     except Exception as e:
-        logger.error(f"画像データ処理エラー: {e}")
+        logger.exception("画像データ処理エラー: %s", e)
         return None
         
 def update_album_art_display(photo_image):
@@ -709,16 +857,18 @@ def update_album_art_display(photo_image):
             target_width = album_art_label.winfo_width()
             target_height = album_art_label.winfo_height()
             if target_width < 10 or target_height < 10:
-               target_width, target_height = 300, 300
+               size = 2500
+            else:
+               size = min(target_width, target_height)
 
-            ddefault_image = default_image.resize((target_width, target_height),Image.Resampling.LANCZOS)
+            default_image = default_image.resize((size, size), Image.Resampling.LANCZOS)
             default_photo = ImageTk.PhotoImage(default_image)
             album_art_label.config(image=default_photo)
             album_art_label.image = default_photo
 
         except Exception as e:
-             print(f"デフォルト画像読み込みエラー: {e}")
-             album_art_label.config(image=None) # 画像なし
+             logger.warning("Default album art load failed: %s", e)
+             album_art_label.config(image=None)
              album_art_label.image = None
 
 
@@ -727,25 +877,24 @@ def mpd_poller():
     while True:
         try:
             if mpd_client is None:
-                print("MPDに接続試行中...")
+                logger.info("MPD connecting...")
                 mpd_client = MPDClient()
                 mpd_client.connect(MPD_HOST, MPD_PORT, timeout=5)
-                print(f"MPDに接続成功 (v{mpd_client.mpd_version})")
-                last_song_id = None # 再接続時は強制更新
+                logger.info("MPD connected (v%s)", mpd_client.mpd_version)
+                last_song_id = None
 
             status = mpd_client.status()
             current_song_id = status.get('songid')
             if current_song_id != last_song_id:
-                print(f"曲変更検出 (旧: {last_song_id}, 新: {current_song_id})")
+                logger.debug("Detected song change: %s -> %s", last_song_id, current_song_id)
                 new_art = fetch_album_art(mpd_client)
                 root.after(0, update_album_art_display, new_art)
                 last_song_id = current_song_id
 
-            # 切断されたらリセット
             mpd_client.ping()
 
         except (MPDError, ConnectionError, TimeoutError, OSError) as e:
-            print(f"MPD接続エラーまたは切断: {e}")
+            logger.warning("MPD connection error or disconnect: %s", e)
             if mpd_client:
                 try:
                     mpd_client.close()
@@ -754,14 +903,13 @@ def mpd_poller():
                     pass
             mpd_client = None
             last_song_id = None
-            # エラー時はデフォルト画像に戻す
             root.after(0, update_album_art_display, None)
-            time.sleep(MPD_POLL_INTERVAL * 2) # 再接続試行まで少し長く待つ
-            continue # 次のループへ
+            time.sleep(MPD_POLL_INTERVAL * 2)
+            continue
 
         except Exception as e:
-             print(f"MPDポーリング中に予期せぬエラー: {e}")
-             time.sleep(MPD_POLL_INTERVAL * 2) # 少し待って再試行
+             logger.exception("Unexpected error during MPD polling: %s", e)
+             time.sleep(MPD_POLL_INTERVAL * 2)
              continue
 
 
@@ -807,12 +955,8 @@ def save_window_state():
     except:
         config["pane_ratio"] = 0.5
 
-    try:
-        total_height = right_paned_window.winfo_height()
-        sash_pos_v = right_paned_window.sashpos(0)
-        config["right_vertical_ratio"] = sash_pos_v / total_height if total_height > 0 else 0.7
-    except:
-        config["right_vertical_ratio"] = 0.7
+    # Remove old right_vertical_ratio if exists
+    config.pop("right_vertical_ratio", None)
 
     save_config(config)
 
@@ -846,19 +990,15 @@ main_paned_window.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
 # 左ペイン: 設定項目
 left_frame = ttk.Frame(main_paned_window, padding="10")
-main_paned_window.add(left_frame, weight=3) # 幅の比率
+main_paned_window.add(left_frame, weight=1) # 幅の比率
 
 # 右ペイン: アルバムアートと状態表示を上下で分割できるようにする
 right_paned_window = ttk.PanedWindow(main_paned_window, orient=tk.VERTICAL)
-main_paned_window.add(right_paned_window, weight=1)
+main_paned_window.add(right_paned_window, weight=4)
 
 # 上：アルバムアート用フレーム
 album_art_frame = ttk.Frame(right_paned_window, padding="10")
-right_paned_window.add(album_art_frame, weight=3)
-
-# 下：設定表示エリア
-settings_frame = ttk.Frame(right_paned_window, padding="10")
-right_paned_window.add(settings_frame, weight=1)
+right_paned_window.add(album_art_frame, weight=1)
 
 # --- 左ペインの内容 ---
 # Music Type / Preset List
@@ -872,16 +1012,36 @@ music_listbox.config(yscrollcommand=music_scrollbar.set)
 
 for item in config["music_types"]:
     music_listbox.insert(tk.END, item)
+# Merge presets from external presets.json into config and the music list (if any)
+try:
+    pdata = load_presets()
+    merged = False
+    for pname, pvals in pdata.get('presets', {}).items():
+        if pname not in config.get('presets', {}):
+            config.setdefault('presets', {})[pname] = pvals
+            merged = True
+        if pname not in config.get('music_types', []):
+            config.setdefault('music_types', []).append(pname)
+            music_listbox.insert(tk.END, pname)
+            merged = True
+    if merged:
+        save_config(config)
+        logger.info("Merged %d external presets from %s into config/music list", len(pdata.get('presets', {})), PRESETS_FILE)
+except Exception as e:
+    logger.warning("Failed to merge external presets from %s: %s", PRESETS_FILE, e)
+
 # Listbox選択変更時のイベント追加（オプション）
 # music_listbox.bind('<<ListboxSelect>>', on_music_type_select)
 
 # プリセット操作ボタン
 preset_button_frame = ttk.Frame(music_lf)
 preset_button_frame.pack(fill=tk.X, pady=(5,0))
-edit_button = ttk.Button(preset_button_frame, text="編集/新規", command=edit_preset, width=8)
-edit_button.pack(side=tk.LEFT, padx=2)
-delete_button = ttk.Button(preset_button_frame, text="削除", command=delete_preset, width=8)
-delete_button.pack(side=tk.LEFT, padx=2)
+edit_button = ttk.Button(preset_button_frame, text="編集/新規", command=edit_preset, width=12)
+edit_button.pack(fill=tk.X, pady=2)
+delete_button = ttk.Button(preset_button_frame, text="削除", command=delete_preset, width=12)
+delete_button.pack(fill=tk.X, pady=2)
+reload_button = ttk.Button(preset_button_frame, text="再読み込み", command=lambda: reload_presets_action(), width=12)
+reload_button.pack(fill=tk.X, pady=2)
 
 
 # --- 設定タブ ---
@@ -936,86 +1096,106 @@ for i, effect_type in enumerate(DEFAULT_EFFECTS_TYPES):
 # Gain/Outputタブ
 gain_output_tab = ttk.Frame(settings_notebook, padding="10")
 settings_notebook.add(gain_output_tab, text="Gain / Output")
+gain_output_tab.columnconfigure(0, weight=1)
+gain_output_tab.columnconfigure(1, weight=1)
 
 # Gain
 gain_var = tk.StringVar(value=config["gain"])
 gain_lf = ttk.LabelFrame(gain_output_tab, text="Global Gain (dB)", padding="10")
-gain_lf.pack(fill=tk.X)
+gain_lf.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
 gain_entry = ttk.Entry(gain_lf, textvariable=gain_var, width=8, font=default_font)
 gain_entry.pack(pady=5)
 
+
+
 # Output Method (single control under Global Gain)
-output_method_var = tk.StringVar(value=config.get("output_method", "aplay"))
+try:
+    output_method_var
+except NameError:
+    output_method_var = tk.StringVar(value=config.get("output_method", "aplay"))
 method_lf = ttk.LabelFrame(gain_lf, text="Output Method", padding=6)
-method_lf.pack(fill=tk.X, pady=(5, 0))
+method_lf.pack(fill=tk.X, pady=(5,0))
 for method in DEFAULT_OUTPUT_METHODS:
     ttk.Radiobutton(method_lf, text=method, variable=output_method_var, value=method).pack(side=tk.LEFT, padx=5)
 
-# Fade-in setting (ms) (single control under Global Gain)
-fade_ms_var = tk.StringVar(value=config.get("fade_ms", "150"))
+# Fade (ms) (single control under Global Gain)
+try:
+    fade_ms_var
+except NameError:
+    fade_ms_var = tk.StringVar(value=config.get("fade_ms", "150"))
 fade_lf = ttk.LabelFrame(gain_lf, text="Fade-in (ms)", padding=6)
-fade_lf.pack(fill=tk.X, pady=(5, 0))
+fade_lf.pack(fill=tk.X, pady=(5,0))
 fade_entry = ttk.Entry(fade_lf, textvariable=fade_ms_var, width=8)
 fade_entry.pack(side=tk.LEFT, padx=5)
 
-# Output Device Selection (nested under Global Gain)
-output_device_var = tk.StringVar(value=config.get("output_device", ""))
-output_device_frame = ttk.Frame(gain_lf)
-output_device_frame.pack(pady=5, fill=tk.X)
-ttk.Label(output_device_frame, text="Output Device:").pack(side=tk.LEFT, padx=(0, 6))
-output_device_combobox = ttk.Combobox(output_device_frame, textvariable=output_device_var, values=[], state="readonly", width=34)
-output_device_combobox.pack(side=tk.LEFT, padx=(0, 6))
-device_refresh_button = ttk.Button(output_device_frame, text="Refresh", width=8)
-device_refresh_button.pack(side=tk.LEFT)
-
-# --- 出力デバイス検出・リフレッシュ機能 ---
-def _on_output_device_change(event):
-    """出力デバイス選択時の処理"""
-    disp = output_device_combobox.get()
-    did = output_device_combobox._device_map.get(disp, disp)
+# Local handler for main combobox
+def _on_main_output_device_change(event):
+    disp = main_output_device_combobox.get()
+    did = main_output_device_combobox._device_map.get(disp, disp)
     config["output_device"] = did
     save_config(config)
     update_output_device(did)
     threading.Thread(target=restart_service, daemon=True).start()
 
-def refresh_output_devices():
-    """出力デバイスの一覧を検出してComboboxに設定"""
-    devices = [("BlueALSA", "bluealsa")]
-    cardnum = ""
-    try:
-        result = subprocess.run(["aplay", "-l"], capture_output=True, text=True)
-        for m in re.finditer(r'(?:card|カード)\s+(\d+):', result.stdout, re.IGNORECASE):
-            start = m.end()
-            next_m = re.search(r'(?:card|カード)\s+\d+:', result.stdout[start:], re.IGNORECASE)
-            end = start + (next_m.start() if next_m else len(result.stdout) - start)
-            block = result.stdout[start:end]
-            if re.search(r'USB', block, re.IGNORECASE):
-                cardnum = m.group(1)
-                break
-    except Exception:
+# Ensure the main output combobox is defined and bound (single control under Gain)
+# If combobox was not yet created (e.g., after a bad edit), create it now.
+try:
+    main_output_device_combobox
+except NameError:
+    main_output_device_var = tk.StringVar()
+    main_output_device_frame = ttk.Frame(gain_lf)
+    main_output_device_frame.pack(pady=5, fill=tk.X)
+    ttk.Label(main_output_device_frame, text="Output Device:").pack(side=tk.LEFT, padx=(0,6))
+    main_output_device_combobox = ttk.Combobox(main_output_device_frame, textvariable=main_output_device_var, values=[], state="readonly", width=34)
+    main_output_device_combobox.pack(side=tk.LEFT, padx=(0,6))
+    refresh_btn = ttk.Button(main_output_device_frame, text="Refresh", command=lambda: _refresh_main_output_devices())
+    refresh_btn.pack(side=tk.LEFT)
+    def _refresh_main_output_devices():
+        devices = [("BlueALSA","bluealsa")]
         cardnum = ""
-    if cardnum:
-        devices.append((f"USB-DAC (hw:{cardnum})", f"hw:{cardnum}"))
-    else:
-        devices.append(("USB-DAC (not connected)", "USB-DAC"))
-    devices.append(("PC Speakers (hw:0)", "hw:0"))
-    display_names = [d[0] for d in devices]
-    output_device_combobox['values'] = display_names
-    output_device_combobox._device_map = {d[0]: d[1] for d in devices}
-    cur_id = config.get("output_device", "")
-    selected = None
-    for disp, did in output_device_combobox._device_map.items():
-        if did == cur_id or (isinstance(cur_id, str) and cur_id in disp):
-            selected = disp
-            break
-    if not selected:
-        selected = display_names[0] if display_names else ''
-    output_device_combobox.set(selected)
+        try:
+            res = subprocess.run(["aplay","-l"], capture_output=True, text=True)
+            for m in re.finditer(r'(?:card|カード)\s+(\d+):', res.stdout, re.IGNORECASE):
+                start = m.end()
+                next_m = re.search(r'(?:card|カード)\s+\d+:', res.stdout[start:], re.IGNORECASE)
+                end = start + (next_m.start() if next_m else len(res.stdout) - start)
+                block = res.stdout[start:end]
+                if re.search(r'USB', block, re.IGNORECASE):
+                    cardnum = m.group(1)
+                    break
+        except Exception:
+            cardnum = ""
+        if cardnum:
+            devices.append((f"USB-DAC (hw:{cardnum})", f"hw:{cardnum}"))
+        else:
+            devices.append(("USB-DAC (not connected)", "USB-DAC"))
+        devices.append(("HDMI (hw:0,3)", "hw:0,3"))
+        devices.append(("PC Speakers (hw:1,0)", "hw:1,0"))
+        display_names = [d[0] for d in devices]
+        main_output_device_combobox['values'] = display_names
+        main_output_device_combobox._device_map = {d[0]: d[1] for d in devices}
+        cur_id = config.get("output_device", "")
+        selected = None
+        for disp, did in main_output_device_combobox._device_map.items():
+            if did == cur_id or (isinstance(cur_id, str) and cur_id in disp):
+                selected = disp
+                break
+        if not selected:
+            selected = display_names[0] if display_names else ''
+        main_output_device_combobox.set(selected)
+    # initialize
+    _refresh_main_output_devices()
 
-# 初期デバイス検出
-refresh_output_devices()
-output_device_combobox.bind("<<ComboboxSelected>>", _on_output_device_change)
-device_refresh_button.config(command=refresh_output_devices)
+main_output_device_combobox.bind("<<ComboboxSelected>>", _on_main_output_device_change)
+# Backwards compatibility: if an old/minimal output combobox exists, bind it too so selection immediately applies
+try:
+    output_device_cb
+    output_device_cb.bind("<<ComboboxSelected>>", lambda e: _on_main_output_device_change(e))
+except NameError:
+    pass
+# The output device selection remains available in the preset edit dialog.
+
+
 
 # --- 適用ボタン ---
 apply_button_frame = ttk.Frame(left_frame, padding="5")
@@ -1023,27 +1203,32 @@ apply_button_frame.pack(fill=tk.X, side=tk.BOTTOM)
 apply_button = ttk.Button(apply_button_frame, text="設定を適用", command=apply_settings, style="Accent.TButton") # Accent スタイルを試す
 apply_button.pack(expand=True, fill=tk.X)
 style.configure("Accent.TButton", font=tkFont.Font(size=14, weight="bold")) # ボタンを目立たせる
+# Ensure Apply button is visible on top and properly laid out
+try:
+    apply_button.lift()
+    apply_button.update_idletasks()
+except Exception:
+    pass
 
 
 # --- 右ペインの内容 ---
 # アルバムアート表示
-album_art_lf = ttk.LabelFrame(album_art_frame, text="Album Art", padding="10")
+album_art_lf = ttk.LabelFrame(album_art_frame, text="Album Art", padding="5")
 album_art_lf.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 # アルバムアート表示用ラベル (初期は空かデフォルト画像)
 album_art_label = ttk.Label(album_art_lf, anchor=tk.CENTER)
-album_art_label.pack(fill=tk.BOTH, expand=True)
+album_art_label.pack(fill=tk.BOTH, expand=True, anchor=tk.CENTER)
 # 初期デフォルト画像読み込み
 update_album_art_display(None)
 
 # 現在の設定表示エリア
-settings_lf = ttk.LabelFrame(settings_frame, text="Current Settings", padding="10")
+settings_lf = ttk.LabelFrame(album_art_frame, text="Current Settings", padding="10")
 settings_lf.pack(fill=tk.X, side=tk.BOTTOM)
 settings_label = ttk.Label(settings_lf, text="", font=status_font, justify=tk.LEFT, anchor=tk.NW)
 settings_label.pack(fill=tk.X)
 
 # 起動時の位置と比率を復元
-if "window_geometry" in config:
-    root.geometry(config["window_geometry"])
+root.geometry(config.get("window_geometry", "2000x1500"))
 
 def restore_panes():
     try:
@@ -1065,22 +1250,13 @@ def restore_panes():
 # 最初にサイズが正しく取得されるタイミングで呼ぶ
 root.after(500, restore_panes)
 
-if "right_vertical_ratio" in config:
-    def restore_right_pane():
-        total_height = right_paned_window.winfo_height()
-        if total_height > 0:
-            right_paned_window.sashpos(0, int(config["right_vertical_ratio"] * total_height))
-    root.after(100, restore_right_pane)
-
 # --- 初期化 ---
 update_gui_from_config() # GUIの初期状態を設定ファイルに合わせる
 display_settings()      # 下部の設定表示を更新
 
-# MPDポーリング用変数とスレッド開始
+# MPDポーリング用変数
 mpd_client = None
 last_song_id = None
-mpd_thread = threading.Thread(target=mpd_poller, daemon=True)
-mpd_thread.start()
 
 def update_output_device(device_id):
     """Apply the selected output device: save to config and trigger service restart.
@@ -1099,5 +1275,9 @@ def update_output_device(device_id):
         logger.exception("出力デバイス適用に失敗しました: %s", e)
         messagebox.showerror("エラー", f"出力デバイスの適用に失敗しました: {e}")
 
-# GUIループ
-root.mainloop()
+# GUIループ (直接実行時のみ開始する)
+if __name__ == "__main__":
+    mpd_thread = threading.Thread(target=mpd_poller, daemon=True)
+    mpd_thread.start()
+
+    root.mainloop()
