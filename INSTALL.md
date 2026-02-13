@@ -161,6 +161,37 @@ python3 ~/bin/sox_gui.py
    aplay -L | grep -i blue
    ```
 
+#### 音飛び (Underrun) が発生する
+
+このシステムは以下の対策を既に実装しています：
+
+- **aplay バッファ最適化**: `--buffer-size=65536 --period-size=8192`
+- **プロセス優先度**: `nice -n -5` (SoX), `nice -n -10` (aplay)
+- **I/O 最適化**: `ionice -c1` (realtime スケジューリング)
+- **パイプバッファ**: `ulimit -p 262144` (256KB)
+
+さらに改善する場合：
+
+1. **CPU パフォーマンス確認**:
+   ```bash
+   watch -n 1 'ps aux | grep -E "(sox|aplay)" | head -2'
+   ```
+
+2. **ALSA バッファ設定の確認**:
+   ```bash
+   cat ~/.asoundrc | grep -E "(period|buffer)"
+   ```
+
+3. **Bluetooth レイテンシ確認** (BlueALSA 使用時):
+   ```bash
+   aplay -D plug:bluealsa --dump-hw-params /dev/zero | grep Period
+   ```
+
+4. **BlueALSA デーモンの再起動** (A2DP 品質最適化):
+   ```bash
+   sudo systemctl restart bluealsa
+   ```
+
 #### 指定したデバイスが見つからない
 
 - リポジトリは存在しないデバイスを自動的に `plug:default` にフォールバック
