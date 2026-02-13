@@ -24,6 +24,11 @@ OUTPUT_DEVICE="bluealsa"
 
 # --- 出力デバイスの選択 ---
 
+# Buffer 最適化: underrun 防止のためバッファサイズを増大
+# 192kHz 32bit stereoproduces 1.536 MB/sec
+# 65536 byte buffer = ~42ms of audio
+ulimit -p 262144  # パイプバッファ 256KB に設定
+
 # 決定された出力先に基づき aplay 用のデバイス指定を行う
 PLAY_DEVICE="plug:default"
 # If the configuration stores a specific hw: or plug: device, use it directly
@@ -174,7 +179,10 @@ elif [ "$OUTPUT_METHOD" == "aplay" ]; then
     OUTPUT_OPTS="-t raw -e signed -b 32 -"
     SOX_FULL_COMMAND="sox ${INPUT_OPTS} \"$FIFO_PATH\" ${OUTPUT_OPTS} ${EFFECT_CHAIN}" # オリジナルスクリプトの順序に修正
     # aplay コマンド (標準入力から S32_LE を読む)
-    PLAY_CMD="| taskset -c 2,3 aplay -D ${PLAY_DEVICE} -f S32_LE -r 192000 -c 2" # use chosen PLAY_DEVICE from config or defaults
+    # --buffer-size=65536: 64KB バッファで underrun 防止
+    # --period-size=8192: 8KB バッファ周期で応答性向上
+    # nice -n -10: 優先度を上げてスケジューリング遅延を最小化
+    PLAY_CMD="| nice -n -10 taskset -c 2,3 aplay -D ${PLAY_DEVICE} -f S32_LE -r 192000 -c 2 --buffer-size=65536 --period-size=8192"
 
 else
     echo "不明な OUTPUT_METHOD: $OUTPUT_METHOD"
@@ -200,9 +208,12 @@ start_sox_pipeline() {
     echo "Executing Sox chain:"
     echo "$SOX_FULL_COMMAND $PLAY_CMD"
     # shellcheck disable=SC2086
-    eval "$SOX_FULL_COMMAND $PLAY_CMD" &
+    # nice -n -5: SoX 処理の優先度を上げて underrun 防止
+    eval "nice -n -5 $SOX_FULL_COMMAND $PLAY_CMD" &
     SOX_PID=$!
     echo "Sox pipeline started (PID=$SOX_PID)"
+    # ionice: I/O 優先度を realtime に設定
+    ionice -c1 -p "$SOX_PID" 2>/dev/null || true
 }
 
 stop_sox_pipeline() {
