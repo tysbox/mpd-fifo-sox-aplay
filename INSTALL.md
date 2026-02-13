@@ -58,6 +58,13 @@ sudo systemctl enable run_sox_fifo.service mpd_watcher.service
 sudo systemctl start run_sox_fifo.service mpd_watcher.service
 ```
 
+> **重要**: `mpd.service` の `ExecStartPost` フックは削除してください。以前の設定で `mpd.service.d/runsox-post.conf` が存在する場合は削除します：
+> ```bash
+> sudo rm -rf /etc/systemd/system/mpd.service.d/runsox-post.conf
+> sudo systemctl daemon-reload
+> ```
+> このファイルがあると、systemd のタイムアウトによって mpd が起動に失敗する可能性があります。
+
 #### ユーザーサービス
 
 ```bash
@@ -121,7 +128,52 @@ ps aux | grep sox
 ps aux | grep aplay
 ```
 
+### 出力デバイス確認
+
+```bash
+# ALSA デバイス一覧
+aplay -l
+aplay -L
+
+# 現在の設定確認
+grep output_device ~/.sox_gui_config.json
+
+# または GUI から確認
+python3 ~/bin/sox_gui.py
+```
+
+### トラブルシューティング
+
+#### Bluetooth (BlueALSA) で音が出ない
+
+1. Bluetooth デバイスが接続されているか確認:
+   ```bash
+   bluetoothctl info
+   ```
+
+2. BlueALSA が実行中か確認:
+   ```bash
+   systemctl status bluealsa
+   ```
+
+3. BlueALSA PCM が利用可能か確認:
+   ```bash
+   aplay -L | grep -i blue
+   ```
+
+#### 指定したデバイスが見つからない
+
+- リポジトリは存在しないデバイスを自動的に `plug:default` にフォールバック
+- 実際に利用可能なデバイスを確認してから設定してください
+
+#### 音が歪む・小さい
+
+- FIRフィルタが適用されている場合、自動的に +5dB が加算されます
+- GUI でゲイン値を調整して音量を最適化してください
+
 ## パス設定の調整
+
+### FIR フィルターパス
 
 `~/bin/run_sox_fifo.sh` 内の `FIR_BASE_PATH` を環境に合わせて変更:
 
@@ -134,6 +186,33 @@ FIR_BASE_PATH="/home/youruser/bin/"
 # または
 FIR_BASE_PATH="/usr/local/share/sox-firs/"
 ```
+
+> **注**: FIRフィルタが適用されている場合、自動的に +5dB (FIR補正) がゲインに加算されます。
+
+### 出力デバイスの初期設定
+
+`~/.sox_gui_config.json` に `output_device` を設定してください：
+
+```json
+{
+  "output_device": "hw:1,0",
+  ...
+}
+```
+
+利用可能な値：
+- `bluealsa` - Bluetooth (BlueALSA)
+- `hw:1,0`, `hw:0,0` など - ALSA ハードウェアデバイス
+- `plug:bluealsa` - BlueALSA (プラグイン経由、フォーマット変換有)
+- `USB-DAC` - USB DAC (自動検出)
+- `plug:default` - デフォルト (フォーマット自動変換)
+
+> **デバイス確認**:
+> ```bash
+> aplay -l          # 利用可能なデバイス一覧
+> aplay -L          # PCM デバイス一覧
+> bluetoothctl devices  # ペアリング済み Bluetooth デバイス
+> ```
 
 ## アンインストール
 

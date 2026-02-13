@@ -44,20 +44,43 @@ chmod +x scripts/install.sh
 python3 ~/bin/sox_gui.py
 ```
 
+GUI から以下を設定できます：
+- **出力デバイス** (Output Device)
+- **FIRフィルター** (ノイズ除去・倍音補正)
+- **イコライザー設定** (音楽ジャンル別)
+- **環境エフェクト** (ホール・スタジオシミュレーション)
+- **ゲイン調整** (マスター音量)
+
+### 出力デバイスの選択
+
+GUIで以下のデバイスを切り替え可能です：
+
+- **Bluetooth (BlueALSA)**: `bluealsa` - LDAC コーデック対応
+- **PC スピーカー**: `hw:1,0` など (ALSA hw: 指定)
+- **HDMI**: `hw:0,0` など
+- **USB-DAC**: `USB-DAC` (自動検出)
+- **汎用**: `plug:default` (フォーマット自動変換)
+
+> **注**: GUI で出力デバイスを変更すると、`run_sox_fifo.service` が自動的に再起動して新しいデバイスで再生を開始します。
+
 ### サービス制御
 
 ```bash
 # 起動
-systemctl --user start run_sox_fifo.service
-systemctl --user start mpd_watcher.service
+sudo systemctl start run_sox_fifo.service
+sudo systemctl start mpd_watcher.service
 
 # 停止
-systemctl --user stop run_sox_fifo.service
-systemctl --user stop mpd_watcher.service
+sudo systemctl stop run_sox_fifo.service
+sudo systemctl stop mpd_watcher.service
 
 # 自動起動有効化
-systemctl --user enable run_sox_fifo.service
-systemctl --user enable mpd_watcher.service
+sudo systemctl enable run_sox_fifo.service
+sudo systemctl enable mpd_watcher.service
+
+# ステータス確認
+sudo systemctl status run_sox_fifo.service
+sudo systemctl status mpd_watcher.service
 ```
 
 ## 設定
@@ -67,7 +90,11 @@ systemctl --user enable mpd_watcher.service
 ### FIRフィルター
 
 - **ノイズ除去**: light, medium, strong, default
+  - FIR フィルタ適用時は自動的に +5dB の音量補正を行います
+  - これによりクリッピングを防ぎながら音質を最大化
+  
 - **倍音補正**: dead, base, med, high, dynamic
+  - 再生環境や好みに応じて倍音のバランスを調整
 
 ### 音楽タイプ
 
@@ -84,10 +111,19 @@ jazz, classical, electronic, vocal, none
 
 ### 出力デバイス
 
-- BlueALSA (Bluetooth)
-- hw:0, hw:1, hw:2, hw:3 (HDMI/アナログ)
-- USB-DAC (自動検出)
-- PC Speakers (hw:0)
+システムで利用可能なデバイスを自動検出し、以下に対応しています：
+
+| デバイスタイプ | 設定値 | 説明 |
+|---|---|---|
+| **Bluetooth** | `bluealsa` | BlueALSA を経由したワイヤレス出力 (LDAC対応) |
+| **ALSA hw** | `hw:0,0`, `hw:1,0` など | ダイレクト ALSA デバイス指定 |
+| **ALSA plug** | `plug:bluealsa`, `plug:default` | フォーマット自動変換ラッパー |
+| **USB-DAC** | `USB-DAC` | USB DAC の自動検出と設定 |
+
+**注意**: 
+- Bluetooth は接続を確立してから選択してください
+- USB-DAC は `USB-DAC` を選択すると自動検出します
+- デバイスが存在しない場合は自動的に `plug:default` にフォールバック
 
 ## ドキュメント
 
