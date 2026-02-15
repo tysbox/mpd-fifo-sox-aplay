@@ -34,7 +34,7 @@ info "プロジェクトルート: $PROJECT_ROOT"
 # 依存パッケージのチェック
 info "依存パッケージを確認中..."
 
-REQUIRED_PKGS="mpd sox python3 alsa-utils"
+REQUIRED_PKGS="mpd sox python3 alsa-utils ecasound bs2b-ladspa"
 MISSING_PKGS=""
 
 for pkg in $REQUIRED_PKGS; do

@@ -11,29 +11,35 @@ CTL_PATH="/tmp/sox.ctl"
 FIR_BASE_PATH="/home/tysbox/bin/"
 
 # --- 設定値 (GUIから書き換えられる部分) ---
-MUSIC_TYPE="jazz"
+MUSIC_TYPE="none"
 EFFECTS_TYPE="vinyl"
-EQ_OUTPUT_TYPE="studio-monitors"
+EQ_OUTPUT_TYPE="Crystal-Clarity"
 GAIN="-5"
 NOISE_FIR_TYPE="default"
-HARMONIC_FIR_TYPE="dynamic"
+HARMONIC_FIR_TYPE="dead"
 OUTPUT_METHOD="aplay"
 OUTPUT_DEVICE="bluealsa"
+CROSSFEED_ENABLED="true"
+CROSSFEED_PRESET="cmoy"
+
 # SAMPLE_RATE="192000" # 現在は192k固定でリサンプル。将来的に可変にする場合のため (GUIから設定可能にする必要あり)
 # --- 設定値ここまで ---
 
 # --- 出力デバイスの選択 ---
 
 # Buffer 最適化: underrun 防止のためバッファサイズを増大
-# 192kHz 32bit stereoproduces 1.536 MB/sec
-# 65536 byte buffer = ~42ms of audio
-ulimit -p 262144  # パイプバッファ 256KB に設定
+# Note: Linux の ulimit -p (pipe size) は通常変更できないため削除。
+# 必要に応じて /proc/sys/fs/pipe-max-size を参照してください。
 
 # 決定された出力先に基づき aplay 用のデバイス指定を行う
 PLAY_DEVICE="plug:default"
 # If the configuration stores a specific hw: or plug: device, use it directly
+# Use plughw: wrapper for hw: devices to ensure format support (e.g. S32_LE/192k)
+# and avoid "Unknown parameter 1" parsing errors with plug:hw: syntax.
 if echo "$OUTPUT_DEVICE" | grep -Eq '^hw:[0-9]+(,[0-9]+)?$'; then
-    PLAY_DEVICE="${OUTPUT_DEVICE}"
+    PLAY_DEVICE=$(echo "$OUTPUT_DEVICE" | sed 's/^hw:/plughw:/')
+elif [ "$OUTPUT_DEVICE" = "PC Speakers" ] || [ "$OUTPUT_DEVICE" = "PC Speakers (hw:0,0)" ]; then
+    PLAY_DEVICE="plughw:0,0"
 elif echo "$OUTPUT_DEVICE" | grep -Eq '^plug:'; then
     PLAY_DEVICE="$OUTPUT_DEVICE"
 elif [ "$OUTPUT_DEVICE" = "bluealsa" ] || [ "$OUTPUT_DEVICE" = "BlueALSA" ]; then
@@ -43,7 +49,7 @@ elif [ "$OUTPUT_DEVICE" = "USB-DAC" ]; then
     # USB 接続カードを検出
     CARDNUM=$(aplay -l 2>/dev/null | grep -m1 USB | sed -n 's/^card \([0-9]\+\):.*/\1/p')
     if [ -n "$CARDNUM" ]; then
-        PLAY_DEVICE="hw:$CARDNUM"
+        PLAY_DEVICE="plughw:$CARDNUM"
     else
         echo "警告: USB DAC が見つかりません。plug:default を使用します。" >&2
         PLAY_DEVICE="plug:default"
@@ -101,19 +107,6 @@ case $MUSIC_TYPE in
     *)           EQ_INPUT="" ;;
 esac
 
-# --- 環境エフェクト設定 ---
-# (元のスクリプトに含まれていたゲイン設定を維持)
-case $EFFECTS_TYPE in
-    Viena-Symphony-Hall) EFFECTS="reverb 50 30 100 100 1 0 bass +2 treble -2 delay 0.3 0.3 gain 2" ;;
-    Suntory-Music-Hall)  EFFECTS="reverb 25 20 70 50 1 0 bass +3 treble -2 delay 0.05 0.05 gain 2" ;;
-    NewMorning-JazzClub) EFFECTS="reverb 20 20 30 10 2 1 compand 0.2,1 6:-70,-60,-30 -1 -90 0.2 gain -7" ;;
-    Wembley-Studium)     EFFECTS="reverb 50 50 100 80 0.6 4 compand 0.3,1 6:-70,-50,-20 -1 -90 0.2 echo 0.7 0.5 20 0.3 chorus 0.7 0.9 55 0.4 0.25 2 -t" ;;
-    AbbeyRoad-Studio)    EFFECTS="highpass 30 reverb 30 20 50 30 0 -2 compand 0.03,1 6:-70,-50,-30 -5 -80 0.2 chorus 0.9 0.8 20 0.2 0.15 2 -t" ;;
-    vinyl)               EFFECTS="overdrive 1.2 8 bass +2 treble -2 delay 0.05 0.05 reverb 20 20 25 20 0.4 -1 compand 0.3,1 6:-70,-55,-40,-40,-25,-20,-15,-10,-5,-5,0,0 2 gain -5" ;;
-    none)                EFFECTS="gain 3" ;; # 元のスクリプトに合わせて gain 3 を維持
-    *)                   EFFECTS="" ;;
-esac
-
 # --- 再生デバイス別のイコライザー設定 ---
 # (元のスクリプトに含まれていたFIRやゲイン設定は、それぞれのフィルター選択や最終ゲインで扱うためここからは削除)
 case $EQ_OUTPUT_TYPE in
@@ -121,18 +114,66 @@ case $EQ_OUTPUT_TYPE in
     JBL-Speakers)    EQ_OUTPUT="equalizer 70 0.7q +3 equalizer 1200 1.0q -2 equalizer 13000 0.8q +5" ;;
     planar-magnetic) EQ_OUTPUT="equalizer 30 0.7q 1 equalizer 180 0.9q -1 equalizer 15000 0.8q +1.0" ;;
     bt-earphones)    EQ_OUTPUT="equalizer 60 1.0q +1 equalizer 3000 1.0q -0.5 equalizer 18000 1.0q 3" ;;
-    med-harmonics)   EQ_OUTPUT="equalizer 50 1.8q +2 equalizer 200 1.1q +1 equalizer 17000 1.0q +2" ;;
-    high-harmonics)  EQ_OUTPUT="" ;; # EQなし
+    Tube-Warmth)
+        # Tube-Warmth: 真空管のような温かみと艶
+        # overdrive で倍音を付加し、低域にわずかな厚みを加える
+        EQ_OUTPUT="overdrive 1.5 5 bass +1.5 100 equalizer 50 1.8q +2 equalizer 200 1.1q +1 equalizer 17000 1.0q +2"
+        ;;
+    Crystal-Clarity)
+        # Crystal-Clarity: 超高域の透明感と解像度
+        # 15kHz以上のAir感を強調し、微細な信号をコンパンドで引き上げる
+        EQ_OUTPUT="treble +2 15k 0.5q compand 0.1,0.3 -60,-60,-30,-15,-5,-5"
+        ;;
+    Monitor-Sim)
+        # Monitor-Sim: ニアフィールド・モニタースピーカーのシミュレーション
+        # 150Hz付近の膨らみを抑え、3kHz付近をわずかに強調して明瞭度を上げる
+        EQ_OUTPUT="equalizer 150 1.0q -2 equalizer 3000 0.8q +1"
+        ;;
     none)            EQ_OUTPUT="" ;;
     *)               EQ_OUTPUT="" ;;
 esac
+
+# --- クロスフィード設定 (bs2b) ---
+# ヘッドホンリスニング時のクロスフィード
+CROSSFEED_CMD=""
+if [ "$CROSSFEED_ENABLED" = "true" ]; then
+    # LADSPA_PATHを設定（環境依存）
+    for ldir in /usr/lib/ladspa /usr/lib/x86_64-linux-gnu/ladspa /usr/local/lib/ladspa; do
+        [ -d "$ldir" ] && export LADSPA_PATH="${LADSPA_PATH:+$LADSPA_PATH:}$ldir"
+    done
+
+    case $CROSSFEED_PRESET in
+        default)
+            # bs2b標準: 700Hz cutoff, 4.5dB feed level
+            BS2B_FEED="4.5"
+            BS2B_CUTOFF="700"
+            ;;
+        cmoy)
+            BS2B_FEED="6.0"
+            BS2B_CUTOFF="650"
+            ;;
+        jmeier)
+            BS2B_FEED="9.5"
+            BS2B_CUTOFF="650"
+            ;;
+        off)
+            CROSSFEED_ENABLED="false"
+            ;;
+        *)
+            BS2B_FEED="4.5"
+            BS2B_CUTOFF="700"
+            ;;
+    esac
+fi
 
 # --- ゲイン調整 (GUIからの値を独立して適用) ---
 FINAL_GAIN_CMD=""
 # FIR フィルタが適用されている場合は、音量補正を追加
 FIR_COMPENSATION=0
-if [ -n "$NOISE_FIR_FILTER" ] || [ -n "$HARMONIC_FIR_FILTER" ]; then
-    FIR_COMPENSATION=5  # FIR適用時は +5dB 補正
+if [ -n "$NOISE_FIR_FILTER" ] && [ -n "$HARMONIC_FIR_FILTER" ]; then
+    FIR_COMPENSATION=8  # 両方適用時は +8dB 補正
+elif [ -n "$NOISE_FIR_FILTER" ] || [ -n "$HARMONIC_FIR_FILTER" ]; then
+    FIR_COMPENSATION=4  # 片方適用時は +4dB 補正
 fi
 
 # GAIN 変数が空でなく、かつ "-0" (文字列としてのゼロ) でない場合のみ gain コマンドを生成
@@ -168,28 +209,49 @@ INPUT_OPTS="-t raw -r 192000 -e signed -b 32 -c 2"
 # 注意: エフェクトは sox [入力] [出力] [エフェクト] の順で指定する必要があるため、
 # エフェクトチェーンの文字列自体はエフェクト部分のみで構成します。
 # dither -s: Shaped noise with Shibata filter (perceptually reduces audible noise floor)
-EFFECT_CHAIN="${NOISE_FIR_FILTER}${NOISE_FIR_FILTER:+" "}${EQ_INPUT}${EQ_INPUT:+" "}${HARMONIC_FIR_FILTER}${HARMONIC_FIR_FILTER:+" "}${EQ_OUTPUT}${EQ_OUTPUT:+" "}${EFFECTS}${EFFECTS:+" "}${RESAMPLE_CMD}${RESAMPLE_CMD:+" "}${FINAL_GAIN_CMD}${FINAL_GAIN_CMD:+" "}silence -l 1 0.05 0% pad 0 0.05 dither -s"
+EFFECT_CHAIN="${NOISE_FIR_FILTER}${NOISE_FIR_FILTER:+" "}${EQ_INPUT}${EQ_INPUT:+" "}${HARMONIC_FIR_FILTER}${HARMONIC_FIR_FILTER:+" "}${EQ_OUTPUT}${EQ_OUTPUT:+" "}${EFFECTS}${EFFECTS:+" "}${RESAMPLE_CMD}${RESAMPLE_CMD:+" "}${FINAL_GAIN_CMD}${FINAL_GAIN_CMD:+" "}dither -s"
 
 
 # 出力方法に応じたコマンド構築
 if [ "$OUTPUT_METHOD" == "soxplay" ]; then
     # play コマンドとして実行
     # play [入力オプション] [入力ファイル] [エフェクト]
-    SOX_FULL_COMMAND="AUDIODEV=${PLAY_DEVICE} play ${INPUT_OPTS} \"$FIFO_PATH\" ${EFFECT_CHAIN}"
+    SOX_FULL_COMMAND="AUDIODEV=${PLAY_DEVICE} nice -n -15 taskset -c 2,3 play ${INPUT_OPTS} \"$FIFO_PATH\" ${EFFECT_CHAIN}"
     PLAY_CMD="" # play コマンド自体が出力を行うためパイプ不要
 
 elif [ "$OUTPUT_METHOD" == "aplay" ]; then
-    # Device-specific audio format configuration
     if echo "$PLAY_DEVICE" | grep -qi bluealsa; then
-        # BlueALSA: use S32_LE at 96kHz for LDAC codec (supports 32bit lossless)
         OUTPUT_OPTS="-t raw -e signed -b 32 -"
-        PLAY_CMD="| nice -n -10 taskset -c 2,3 aplay -D ${PLAY_DEVICE} -f S32_LE -r 96000 -c 2 --buffer-time=500000 --period-time=125000"
+        # BlueALSA: Buffer増やしつつPeriodサイズを細かくして送信タイミングを安定させる (500ms buffer, 8 periods)
+        APLAY_CMD="aplay -D ${PLAY_DEVICE} -f S32_LE -r 96000 -c 2 --buffer-time=500000 --period-time=62500"
     else
-        # PC audio and USB DAC: use S32_LE for maximum quality
         OUTPUT_OPTS="-t raw -e signed -b 32 -"
-        PLAY_CMD="| nice -n -10 taskset -c 2,3 aplay -D ${PLAY_DEVICE} -f S32_LE -r 192000 -c 2 --buffer-size=65536 --period-size=8192"
+        APLAY_CMD="aplay -D ${PLAY_DEVICE} -f S32_LE -r 192000 -c 2 --buffer-size=65536 --period-size=8192"
     fi
-    
+
+    # クロスフィードが有効な場合、ecasoundをSoXとaplayの間に挿入
+    if [ "$CROSSFEED_ENABLED" = "true" ]; then
+        # SoXの出力サンプルレートを取得
+        if echo "$PLAY_DEVICE" | grep -qi bluealsa; then
+            CF_RATE="96000"
+        else
+            CF_RATE="192000"
+        fi
+
+        # ecasound を間に挿入：stdin → bs2b LADSPA → stdout
+        # -q: quiet, -B:realtime で低遅延バッファモード, -b:4096 で内部バッファを拡大
+        CROSSFEED_PIPE="| nice -n -8 ecasound -q -B:realtime -b:4096 \
+            -f:s32_le,2,${CF_RATE} \
+            -i:stdin \
+            -el:bs2b,${BS2B_FEED},${BS2B_CUTOFF} \
+            -f:s32_le,2,${CF_RATE} \
+            -o:stdout"
+
+        PLAY_CMD="${CROSSFEED_PIPE} | nice -n -10 taskset -c 2,3 ${APLAY_CMD}"
+    else
+        PLAY_CMD="| nice -n -10 taskset -c 2,3 ${APLAY_CMD}"
+    fi
+
     SOX_FULL_COMMAND="sox ${INPUT_OPTS} \"$FIFO_PATH\" ${OUTPUT_OPTS} ${EFFECT_CHAIN}"
 
 else

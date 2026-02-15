@@ -9,10 +9,11 @@
 ### 主な機能
 
 - **FIRフィルター処理**: ノイズ除去と倍音補正のための複数のFIRフィルター
-- **イコライザー**: 音楽ジャンル別・再生デバイス別のEQ設定
+- **ダイナミック・ゲイン補正**: FIRフィルタ適用状況に応じた自動音量補正 (+4dB / +8dB)
+- **クロスフィード処理**: bs2b によるヘッドホンリスニングの自然化 (ecasound 統合)
+- **イコライザー**: 音楽ジャンル別・再生デバイス別の詳細設定 (`Tube-Warmth`, `Crystal-Clarity` など)
 - **環境エフェクト**: コンサートホール、スタジオ、ジャズクラブなどの空間シミュレーション
 - **出力デバイス切り替え**: BlueALSA、HDMI、USB-DAC、PC スピーカーなど
-- **ゲイン調整**: FIR適用時の自動+5dBゲイン補正
 - **GUI制御**: Python/Tkinter による直感的な設定インターフェース
 - **systemd統合**: サービスとして自動起動・管理
 
@@ -21,6 +22,8 @@
 - Linux (Debian/Ubuntu系推奨)
 - MPD (Music Player Daemon)
 - SoX (Sound eXchange)
+- ecasound (クロスフィード処理用)
+- bs2b-ladspa (クロスフィード用プラグイン)
 - Python 3.6+
 - ALSA
 - systemd
@@ -90,24 +93,27 @@ sudo systemctl status mpd_watcher.service
 ### FIRフィルター
 
 - **ノイズ除去**: light, medium, strong, default
-  - FIR フィルタ適用時は自動的に +5dB の音量補正を行います
-  - これによりクリッピングを防ぎながら音質を最大化
-  
 - **倍音補正**: dead, base, med, high, dynamic
-  - 再生環境や好みに応じて倍音のバランスを調整
+  - **ダイナミック・ゲイン補正機能**:
+    - Noise/Harmonic どちらか片方のFIR適用時: **+4dB**
+    - 両方のFIR適用時: **+8dB**
+    - これにより、FIRフィルタによる減衰を自動的に補正し、SNRを最適化します。
 
 ### 音楽タイプ
 
 jazz, classical, electronic, vocal, none
 
-### 環境エフェクト
+### 出力 EQ プロファイル
 
-- Viena-Symphony-Hall
-- Suntory-Music-Hall
-- NewMorning-JazzClub
-- Wembley-Studium
-- AbbeyRoad-Studio
-- vinyl
+- **Tube-Warmth**: 真空管アンプのような温かみと艶を付加 (Overdrive処理)
+- **Crystal-Clarity**: 高域の透明感と解像度を強調
+- **Monitor-Sim**: スタジオモニターのようなフラットで明瞭なサウンド
+- その他: studio-monitors, JBL-Speakers, planar-magnetic, bt-earphones
+
+### クロスフィード (bs2b)
+
+ヘッドホンでの長時間リスニング時の疲労を軽減する、自然な音の広がりを実現します。
+- `default`, `cmoy`, `jmeier` のプリセットを選択可能。
 
 ### 出力デバイス
 

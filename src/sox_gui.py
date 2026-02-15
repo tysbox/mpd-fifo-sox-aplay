@@ -45,7 +45,7 @@ DEFAULT_MUSIC_TYPES = ["jazz", "classical", "electronic", "vocal", "none"]
 DEFAULT_EFFECTS_TYPES = ["Viena-Symphony-Hall", "Suntory-Music-Hall", "NewMorning-JazzClub",
                          "Wembley-Studium", "AbbeyRoad-Studio", "vinyl", "none"]
 DEFAULT_EQ_OUTPUT_TYPES = ["studio-monitors", "JBL-Speakers", "planar-magnetic", "bt-earphones",
-                           "med-harmonics", "high-harmonics", "none"]
+                           "Tube-Warmth", "Crystal-Clarity", "none"]
 DEFAULT_OUTPUT_METHODS = ["aplay", "soxplay"]
 DEFAULT_NOISE_FIR_TYPES = ["default", "light", "medium", "strong", "off"] # シェルスクリプトのcaseに合わせる
 DEFAULT_HARMONIC_FIR_TYPES = ["dynamic", "dead", "base", "med", "high", "off"] # シェルスクリプトのcaseに合わせる
@@ -58,7 +58,7 @@ def load_presets():
     If file missing or invalid, create a default structure and return it."""
     defaults = {
         "effects": ["Viena-Symphony-Hall","Suntory-Music-Hall","NewMorning-JazzClub","Wembley-Studium","AbbeyRoad-Studio","vinyl","none"],
-        "eq_outputs": ["studio-monitors","JBL-Speakers","planar-magnetic","bt-earphones","med-harmonics","high-harmonics","none"],
+        "eq_outputs": ["studio-monitors","JBL-Speakers","planar-magnetic","bt-earphones","Tube-Warmth","Crystal-Clarity","Monitor-Sim","none"],
         "presets": {}
     }
     try:
@@ -96,6 +96,8 @@ def load_config():
     config.setdefault("harmonic_fir_type", "base") # 新しい設定
     config.setdefault("fade_ms", "150") # フェードイン時間（ms）
     config.setdefault("output_device", "BlueALSA") # 新しい設定: 出力デバイス (デフォルト BlueALSA)
+    config.setdefault("crossfeed_enabled", "false")
+    config.setdefault("crossfeed_preset", "off")
     config.setdefault("presets", {})
 
     # 古いプリセット形式からの移行（もし必要なら）
@@ -331,7 +333,9 @@ def update_shell_script(config):
             "HARMONIC_FIR_TYPE": config["harmonic_fir_type"],
             "OUTPUT_METHOD": config["output_method"],
             "FADE_MS": config.get("fade_ms", "150"),
-            "OUTPUT_DEVICE": config.get("output_device", "BlueALSA")
+            "OUTPUT_DEVICE": config.get("output_device", "BlueALSA"),
+            "CROSSFEED_ENABLED": config.get("crossfeed_enabled", "false"),
+            "CROSSFEED_PRESET": config.get("crossfeed_preset", "off")
         }
 
         for line in lines:
@@ -399,7 +403,9 @@ def apply_settings():
             "noise_fir_type": noise_fir_var.get(),
             "harmonic_fir_type": harmonic_fir_var.get(),
             "output_method": output_method_var.get(),
-            "fade_ms": fade_ms_var.get()
+            "fade_ms": fade_ms_var.get(),
+            "crossfeed_enabled": crossfeed_enabled_var.get(),
+            "crossfeed_preset": crossfeed_preset_var.get()
         }
         override = any(str(ui_values[k]) != str(preset.get(k, ui_values[k])) for k in ui_values)
         if override:
@@ -412,6 +418,8 @@ def apply_settings():
             config["gain"] = preset.get("gain", ui_values["gain"])
             config["noise_fir_type"] = preset.get("noise_fir_type", ui_values["noise_fir_type"])
             config["harmonic_fir_type"] = preset.get("harmonic_fir_type", ui_values["harmonic_fir_type"])
+            config["crossfeed_enabled"] = preset.get("crossfeed_enabled", ui_values["crossfeed_enabled"])
+            config["crossfeed_preset"] = preset.get("crossfeed_preset", ui_values["crossfeed_preset"])
             config["output_method"] = ui_values["output_method"]
             config["fade_ms"] = ui_values["fade_ms"]
     else:
@@ -423,6 +431,8 @@ def apply_settings():
         config["harmonic_fir_type"] = harmonic_fir_var.get()
         config["output_method"] = output_method_var.get()
         config["fade_ms"] = fade_ms_var.get()
+        config["crossfeed_enabled"] = crossfeed_enabled_var.get()
+        config["crossfeed_preset"] = crossfeed_preset_var.get()
 
     # Note: output_device is managed via presets and edit dialog; no main-device combobox by default.
 
@@ -470,6 +480,8 @@ def update_gui_from_config():
     output_method_var.set(config["output_method"])
     try:
         fade_ms_var.set(config.get("fade_ms", "150"))
+        crossfeed_enabled_var.set(config.get("crossfeed_enabled", "false"))
+        crossfeed_preset_var.set(config.get("crossfeed_preset", "off"))
     except NameError:
         pass
 
@@ -522,11 +534,12 @@ def edit_preset():
     effects_tab = ttk.Frame(notebook, padding="10")
     notebook.add(effects_tab, text="Effects")
     edit_effects_var = tk.StringVar(value=initial_preset["effects_type"])
-    ttk.Label(effects_tab, text="Effects Type:").pack(anchor=tk.NW)
-    effects_scroll_frame = ScrollableFrame(effects_tab) # スクロール可能フレーム
+    effects_lf = ttk.LabelFrame(effects_tab, text="Effects Type:", padding="10")
+    effects_lf.pack(fill=tk.BOTH, expand=True)
+    
+    # 縦1列で表示
     for effect in DEFAULT_EFFECTS_TYPES:
-        ttk.Radiobutton(effects_scroll_frame.scrollable_frame, text=effect, variable=edit_effects_var, value=effect).pack(anchor=tk.NW, padx=5)
-    effects_scroll_frame.pack(fill=tk.BOTH, expand=True)
+        ttk.Radiobutton(effects_lf, text=effect, variable=edit_effects_var, value=effect).pack(anchor=tk.NW, padx=5, pady=2)
 
 
     # EQ/FIRタブ
@@ -554,7 +567,7 @@ def edit_preset():
     eq_output_lf = ttk.LabelFrame(eq_fir_tab, text="Output EQ", padding="10")
     eq_output_lf.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
     # Output EQ項目が多い場合はスクロールフレーム化を検討
-    col_count = 3 # 3列で表示
+    col_count = 2 # 2列で表示
     for i, eq_out in enumerate(DEFAULT_EQ_OUTPUT_TYPES):
         rb = ttk.Radiobutton(eq_output_lf, text=eq_out, variable=edit_eq_var, value=eq_out)
         rb.grid(row=i // col_count, column=i % col_count, sticky=tk.W, padx=5)
@@ -684,7 +697,8 @@ def display_settings():
     settings_text += f"Output EQ: {config['eq_output_type']}\n"
     settings_text += f"Effects: {config['effects_type']}\n"
     settings_text += f"Gain: {config['gain']} dB | "
-    settings_text += f"Output: {config['output_method']}"
+    settings_text += f"Output: {config['output_method']}\n"
+    settings_text += f"Crossfeed: {config.get('crossfeed_enabled','false')} ({config.get('crossfeed_preset','off')})"
     settings_label.config(text=settings_text)
 
 # --- アルバムアート関連 ---
@@ -998,7 +1012,11 @@ main_paned_window.add(right_paned_window, weight=4)
 
 # 上：アルバムアート用フレーム
 album_art_frame = ttk.Frame(right_paned_window, padding="10")
-right_paned_window.add(album_art_frame, weight=1)
+right_paned_window.add(album_art_frame, weight=3)
+
+# 下：状態表示用フレーム (復旧)
+settings_view_frame = ttk.Frame(right_paned_window, padding="10")
+right_paned_window.add(settings_view_frame, weight=1)
 
 # --- 左ペインの内容 ---
 # Music Type / Preset List
@@ -1087,46 +1105,61 @@ settings_notebook.add(effects_tab, text="Effects")
 effects_var = tk.StringVar(value=config["effects_type"])
 effects_lf = ttk.LabelFrame(effects_tab, text="Ambience & Dynamics", padding="10")
 effects_lf.pack(fill=tk.BOTH, expand=True)
-# Effects項目を複数列で表示
-col_count = 2
-for i, effect_type in enumerate(DEFAULT_EFFECTS_TYPES):
+# Effects項目を縦1列で表示
+for effect_type in DEFAULT_EFFECTS_TYPES:
      rb = ttk.Radiobutton(effects_lf, text=effect_type, variable=effects_var, value=effect_type)
-     rb.grid(row=i // col_count, column=i % col_count, sticky=tk.W, padx=10, pady=2)
+     rb.pack(anchor=tk.W, padx=10, pady=2)
+
+# --- Crossfeed (bs2b) セクション (Effectsタブ内に追加) ---
+crossfeed_lf = ttk.LabelFrame(effects_tab, text="Crossfeed (bs2b)", padding="10")
+crossfeed_lf.pack(fill=tk.X, pady=(10, 0))
+
+crossfeed_enabled_var = tk.StringVar(value=config.get("crossfeed_enabled", "false"))
+crossfeed_preset_var = tk.StringVar(value=config.get("crossfeed_preset", "off"))
+
+ttk.Checkbutton(crossfeed_lf, text="Enable Crossfeed", variable=crossfeed_enabled_var, 
+                onvalue="true", offvalue="false").pack(side=tk.LEFT, padx=5)
+
+ttk.Label(crossfeed_lf, text="Preset:").pack(side=tk.LEFT, padx=(10, 5))
+crossfeed_presets = ["default", "cmoy", "jmeier", "off"]
+crossfeed_cb = ttk.Combobox(crossfeed_lf, textvariable=crossfeed_preset_var, values=crossfeed_presets, state="readonly", width=10)
+crossfeed_cb.pack(side=tk.LEFT, padx=5)
 
 # Gain/Outputタブ
 gain_output_tab = ttk.Frame(settings_notebook, padding="10")
 settings_notebook.add(gain_output_tab, text="Gain / Output")
-gain_output_tab.columnconfigure(0, weight=1)
-gain_output_tab.columnconfigure(1, weight=1)
 
+# 各項目を縦一列に表示 (各項目を pack で順次配置)
 # Gain
 gain_var = tk.StringVar(value=config["gain"])
 gain_lf = ttk.LabelFrame(gain_output_tab, text="Global Gain (dB)", padding="10")
-gain_lf.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+gain_lf.pack(fill=tk.X, pady=(0, 10))
 gain_entry = ttk.Entry(gain_lf, textvariable=gain_var, width=8, font=default_font)
 gain_entry.pack(pady=5)
 
-
-
-# Output Method (single control under Global Gain)
-try:
-    output_method_var
-except NameError:
-    output_method_var = tk.StringVar(value=config.get("output_method", "aplay"))
-method_lf = ttk.LabelFrame(gain_lf, text="Output Method", padding=6)
-method_lf.pack(fill=tk.X, pady=(5,0))
-for method in DEFAULT_OUTPUT_METHODS:
-    ttk.Radiobutton(method_lf, text=method, variable=output_method_var, value=method).pack(side=tk.LEFT, padx=5)
-
-# Fade (ms) (single control under Global Gain)
+# Fade (ms)
 try:
     fade_ms_var
 except NameError:
     fade_ms_var = tk.StringVar(value=config.get("fade_ms", "150"))
-fade_lf = ttk.LabelFrame(gain_lf, text="Fade-in (ms)", padding=6)
-fade_lf.pack(fill=tk.X, pady=(5,0))
+fade_lf = ttk.LabelFrame(gain_output_tab, text="Fade-in (ms)", padding=6)
+fade_lf.pack(fill=tk.X, pady=(0, 10))
 fade_entry = ttk.Entry(fade_lf, textvariable=fade_ms_var, width=8)
 fade_entry.pack(side=tk.LEFT, padx=5)
+
+# Output Method
+try:
+    output_method_var
+except NameError:
+    output_method_var = tk.StringVar(value=config.get("output_method", "aplay"))
+method_lf = ttk.LabelFrame(gain_output_tab, text="Output Method", padding=6)
+method_lf.pack(fill=tk.X, pady=(0, 10))
+for method in DEFAULT_OUTPUT_METHODS:
+    ttk.Radiobutton(method_lf, text=method, variable=output_method_var, value=method).pack(side=tk.LEFT, padx=5)
+
+# Output Device Section
+device_lf = ttk.LabelFrame(gain_output_tab, text="Output Device", padding=10)
+device_lf.pack(fill=tk.X)
 
 # Local handler for main combobox
 def _on_main_output_device_change(event):
@@ -1137,16 +1170,15 @@ def _on_main_output_device_change(event):
     update_output_device(did)
     threading.Thread(target=restart_service, daemon=True).start()
 
-# Ensure the main output combobox is defined and bound (single control under Gain)
-# If combobox was not yet created (e.g., after a bad edit), create it now.
+# Ensure the main output combobox is defined and bound
 try:
     main_output_device_combobox
 except NameError:
     main_output_device_var = tk.StringVar()
-    main_output_device_frame = ttk.Frame(gain_lf)
+    main_output_device_frame = ttk.Frame(device_lf)
     main_output_device_frame.pack(pady=5, fill=tk.X)
-    ttk.Label(main_output_device_frame, text="Output Device:").pack(side=tk.LEFT, padx=(0,6))
-    main_output_device_combobox = ttk.Combobox(main_output_device_frame, textvariable=main_output_device_var, values=[], state="readonly", width=34)
+    ttk.Label(main_output_device_frame, text="Device:").pack(side=tk.LEFT, padx=(0,6))
+    main_output_device_combobox = ttk.Combobox(main_output_device_frame, textvariable=main_output_device_var, values=[], state="readonly", width=25)
     main_output_device_combobox.pack(side=tk.LEFT, padx=(0,6))
     refresh_btn = ttk.Button(main_output_device_frame, text="Refresh", command=lambda: _refresh_main_output_devices())
     refresh_btn.pack(side=tk.LEFT)
@@ -1170,7 +1202,7 @@ except NameError:
         else:
             devices.append(("USB-DAC (not connected)", "USB-DAC"))
         devices.append(("HDMI (hw:0,3)", "hw:0,3"))
-        devices.append(("PC Speakers (hw:1,0)", "hw:1,0"))
+        devices.append(("PC Speakers (hw:0,0)", "hw:0,0"))
         display_names = [d[0] for d in devices]
         main_output_device_combobox['values'] = display_names
         main_output_device_combobox._device_map = {d[0]: d[1] for d in devices}
@@ -1200,9 +1232,8 @@ except NameError:
 # --- 適用ボタン ---
 apply_button_frame = ttk.Frame(left_frame, padding="5")
 apply_button_frame.pack(fill=tk.X, side=tk.BOTTOM)
-apply_button = ttk.Button(apply_button_frame, text="設定を適用", command=apply_settings, style="Accent.TButton") # Accent スタイルを試す
+apply_button = ttk.Button(apply_button_frame, text="設定を適用", command=apply_settings)
 apply_button.pack(expand=True, fill=tk.X)
-style.configure("Accent.TButton", font=tkFont.Font(size=14, weight="bold")) # ボタンを目立たせる
 # Ensure Apply button is visible on top and properly laid out
 try:
     apply_button.lift()
@@ -1214,18 +1245,18 @@ except Exception:
 # --- 右ペインの内容 ---
 # アルバムアート表示
 album_art_lf = ttk.LabelFrame(album_art_frame, text="Album Art", padding="5")
-album_art_lf.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+album_art_lf.pack(fill=tk.BOTH, expand=True)
 # アルバムアート表示用ラベル (初期は空かデフォルト画像)
 album_art_label = ttk.Label(album_art_lf, anchor=tk.CENTER)
 album_art_label.pack(fill=tk.BOTH, expand=True, anchor=tk.CENTER)
 # 初期デフォルト画像読み込み
 update_album_art_display(None)
 
-# 現在の設定表示エリア
-settings_lf = ttk.LabelFrame(album_art_frame, text="Current Settings", padding="10")
-settings_lf.pack(fill=tk.X, side=tk.BOTTOM)
+# 現在の設定表示エリア (別ペインに配置して垂直リサイズを復旧)
+settings_lf = ttk.LabelFrame(settings_view_frame, text="Current Settings", padding="10")
+settings_lf.pack(fill=tk.BOTH, expand=True)
 settings_label = ttk.Label(settings_lf, text="", font=status_font, justify=tk.LEFT, anchor=tk.NW)
-settings_label.pack(fill=tk.X)
+settings_label.pack(fill=tk.BOTH, expand=True)
 
 # 起動時の位置と比率を復元
 root.geometry(config.get("window_geometry", "2000x1500"))
@@ -1258,8 +1289,30 @@ display_settings()      # 下部の設定表示を更新
 mpd_client = None
 last_song_id = None
 
+def on_closing():
+    """ウィンドウを閉じる際に現在のジオメトリとペイン比率を保存する"""
+    try:
+        config["window_geometry"] = root.geometry()
+        
+        # メインペイン（左右）の比率
+        total_width = main_paned_window.winfo_width()
+        if total_width > 0:
+            config["pane_ratio"] = main_paned_window.sashpos(0) / total_width
+            
+        # 右ペイン（上下）の比率
+        total_height = right_paned_window.winfo_height()
+        if total_height > 0:
+            config["right_vertical_ratio"] = right_paned_window.sashpos(0) / total_height
+            
+        save_config(config)
+    except Exception as e:
+        logger.error("ウィンドウ状態の保存に失敗しました: %s", e)
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_closing)
+
 def update_output_device(device_id):
-    """Apply the selected output device: save to config and trigger service restart.
+    """Apply the selected output device: update shell script, save to config and trigger service restart.
 
     device_id can be 'bluealsa', 'hw:0', or 'hw:X'.
     """
@@ -1267,6 +1320,8 @@ def update_output_device(device_id):
         # normalize
         did = str(device_id)
         config["output_device"] = did
+        # Update shell script so the service picks it up
+        update_shell_script(config)
         save_config(config)
         # Restart service to pick up new device
         threading.Thread(target=restart_service, daemon=True).start()
